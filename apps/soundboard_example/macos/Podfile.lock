@@ -1,0 +1,28 @@
+PODS:
+  - FlutterMacOS (1.0.0)
+  - microphone_flutter (0.0.1):
+    - FlutterMacOS
+  - sound_flutter (0.0.1):
+    - FlutterMacOS
+
+DEPENDENCIES:
+  - FlutterMacOS (from `Flutter/ephemeral`)
+  - microphone_flutter (from `Flutter/ephemeral/.symlinks/plugins/microphone_flutter/macos`)
+  - sound_flutter (from `Flutter/ephemeral/.symlinks/plugins/sound_flutter/macos`)
+
+EXTERNAL SOURCES:
+  FlutterMacOS:
+    :path: Flutter/ephemeral
+  microphone_flutter:
+    :path: Flutter/ephemeral/.symlinks/plugins/microphone_flutter/macos
+  sound_flutter:
+    :path: Flutter/ephemeral/.symlinks/plugins/sound_flutter/macos
+
+SPEC CHECKSUMS:
+  FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
+  microphone_flutter: 3f41f199ab56e3ec07c042dc1dd8284d8254022a
+  sound_flutter: 5ba56d1f2df0f5085ac9fa104c2260ac49bcfb34
+
+PODFILE CHECKSUM: 54d867c82ac51cbd61b565781b9fada492027009
+
+COCOAPODS: 1.16.2

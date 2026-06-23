@@ -1,0 +1,48 @@
+name: soundboard_example
+description: >-
+  Example Flutter app for the soundboard package: shows the OS-level virtual
+  microphone device, plays test tones into it, and mixes a selected physical
+  microphone into the mix. macOS uses the CoreAudio (BlackHole) virtual mic;
+  Linux uses the PipeWire virtual mic.
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.0
+
+# This Flutter app is intentionally NOT a member of the repo's pure-Dart pub
+# workspace (a workspace cannot include Flutter packages). It uses path
+# dependencies and its own resolution. soundboard provides the mixer and the
+# platform virtual-mic entry points; the *_flutter plugins build the native
+# Rust libraries (libsound_cli / libmicrophone) via cargokit and force-load
+# them into the app, which is how soundboard's FFI loaders find the symbols.
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  soundboard:
+    path: ../../packages/soundboard
+  sound_flutter:
+    path: ../../sound/packages/sound_flutter
+  microphone_flutter:
+    path: ../../microphone/packages/microphone_flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+# Pin the leaf Dart packages to the vendored copies in this repo. They are not
+# workspace members here (a Flutter app cannot join the pure-Dart workspace), so
+# without these overrides pub would resolve the older pub.dev releases, which
+# predate the StreamCaptureBackend / MixingCaptureBackend the mixer relies on.
+dependency_overrides:
+  sound_dart:
+    path: ../../sound/packages/sound_dart
+  microphone_dart:
+    path: ../../microphone/packages/microphone_dart
+
+flutter:
+  uses-material-design: true
