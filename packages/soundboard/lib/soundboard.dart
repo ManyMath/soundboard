@@ -7,3 +7,9 @@
 ///
 /// The entry point is [Soundboard]; see its [Soundboard.asMicrophoneBackend].
 library;
+
+export 'package:microphone_dart/microphone_dart.dart'
+    show CaptureBackend, CaptureFormat, SampleFormat;
+
+export 'src/clip.dart';
+export 'src/soundboard.dart';
