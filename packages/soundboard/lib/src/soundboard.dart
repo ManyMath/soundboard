@@ -77,8 +77,137 @@ class Soundboard {
   /// Stops every active clip immediately. The microphone is unaffected.
   void stopAll() => _clipBus.stopAll();
 
+  /// A capture backend that yields the physical microphone plus active clips,
+  /// mixed.
+  ///
+  /// Hand the result to any `microphone_dart` consumer (or register it with
+  /// `Microphone.registerBackend`) in place of the default hardware backend.
+  /// [physicalMic] is the microphone source; when null the platform's currently
+  /// selected `Microphone.backend` is used (the real microphone on native, the
+  /// silent fallback in headless environments). The microphone is the primary
+  /// timeline -- it runs continuously and clips are mixed in as they play --
+  /// with [micVolume] applied to it and [masterVolume] to the clip bus.
+  CaptureBackend asMicrophoneBackend({CaptureBackend? physicalMic}) {
+    final mic = _GainCaptureBackend(
+      physicalMic ?? Microphone.backend,
+      () => micVolume,
+      format,
+    );
+    final clips = StreamCaptureBackend(source: _clipBus.frames, format: format);
+    return MixingCaptureBackend([mic, clips], format: format, primary: 0);
+  }
+
   /// Releases the soundboard's mixing resources.
   Future<void> dispose() => _clipBus.dispose();
+}
+
+/// Wraps a capture backend and scales its frames by a live gain, so the mixer
+/// can apply a bus volume without the source knowing about it. Capture always
+/// uses [_format]; the format passed to [startRecording] is ignored.
+class _GainCaptureBackend extends CaptureBackend {
+  _GainCaptureBackend(this._inner, this._gain, this._format);
+
+  final CaptureBackend _inner;
+  final double Function() _gain;
+  final CaptureFormat _format;
+
+  @override
+  String get name => 'gain(${_inner.name})';
+
+  @override
+  int get priority => _inner.priority;
+
+  @override
+  bool get isAvailable => _inner.isAvailable;
+
+  @override
+  Future<void> initialize() => _inner.initialize();
+
+  @override
+  Future<bool> hasPermission() => _inner.hasPermission();
+
+  @override
+  Future<bool> requestPermission() => _inner.requestPermission();
+
+  @override
+  Future<List<CaptureDevice>> devices() => _inner.devices();
+
+  @override
+  Future<Recording> startRecording({
+    CaptureFormat format = const CaptureFormat(),
+    String? deviceId,
+  }) async {
+    final inner = await _inner.startRecording(
+      format: _format,
+      deviceId: deviceId,
+    );
+    return _GainRecording(inner, _gain);
+  }
+
+  @override
+  Future<void> dispose() => _inner.dispose();
+}
+
+/// The [Recording] from [_GainCaptureBackend]: forwards everything to the inner
+/// recording but scales the live [frames] by the gain. (The mixer only consumes
+/// [frames], so the accumulated [pcm]/[stop] bytes stay the unscaled original.)
+class _GainRecording implements Recording {
+  _GainRecording(this._inner, this._gain);
+
+  final Recording _inner;
+  final double Function() _gain;
+
+  @override
+  RecordingState get state => _inner.state;
+
+  @override
+  bool get isRecording => _inner.isRecording;
+
+  @override
+  CaptureFormat get format => _inner.format;
+
+  @override
+  Stream<Uint8List> get frames => _inner.frames.map(_scale);
+
+  @override
+  Uint8List get pcm => _inner.pcm;
+
+  @override
+  Duration get duration => _inner.duration;
+
+  @override
+  Future<void> pause() => _inner.pause();
+
+  @override
+  Future<void> resume() => _inner.resume();
+
+  @override
+  Future<Uint8List> stop() => _inner.stop();
+
+  @override
+  Future<String> stopToFile(String path) => _inner.stopToFile(path);
+
+  @override
+  Future<void> dispose() => _inner.dispose();
+
+  Uint8List _scale(Uint8List chunk) {
+    final gain = _gain();
+    if (gain == 1.0) return chunk;
+    final n = chunk.length ~/ 2;
+    final out = Uint8List(chunk.length);
+    final inView = ByteData.sublistView(chunk);
+    final outView = ByteData.sublistView(out);
+    for (var i = 0; i < n; i++) {
+      var v = (inView.getInt16(i * 2, Endian.little) * gain).round();
+      if (v > 32767) {
+        v = 32767;
+      } else if (v < -32768) {
+        v = -32768;
+      }
+      outView.setInt16(i * 2, v, Endian.little);
+    }
+    return out;
+  }
 }
 
 /// Mixes the currently playing clips into a single bus stream.
