@@ -1,0 +1,433 @@
+import 'dart:async';
+import 'dart:ffi';
+import 'dart:io';
+
+import 'package:ffi/ffi.dart';
+
+import '../../exceptions.dart';
+import '../../playback.dart';
+import '../../sound_backend.dart';
+import '../../sound_source.dart';
+
+/// The default native backend on platforms with `dart:ffi`.
+SoundBackend? createNativeBackend() => FfiBackend();
+
+// --- C ABI signatures, mirroring native/sound_cli/src/lib.rs -------------
+
+typedef _PlayerNewNative = Pointer<Void> Function();
+typedef _PlayerFreeNative = Void Function(Pointer<Void>);
+typedef _PlayerFree = void Function(Pointer<Void>);
+typedef _PlayBytesNative =
+    Uint64 Function(Pointer<Void>, Pointer<Uint8>, Size, Pointer<Utf8>, Int32);
+typedef _PlayBytes =
+    int Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Utf8>, int);
+typedef _PlayFileNative = Uint64 Function(Pointer<Void>, Pointer<Utf8>, Int32);
+typedef _PlayFile = int Function(Pointer<Void>, Pointer<Utf8>, int);
+typedef _VoiceStateNative = Int32 Function(Pointer<Void>, Uint64);
+typedef _VoiceState = int Function(Pointer<Void>, int);
+typedef _VoiceOpNative = Int32 Function(Pointer<Void>, Uint64);
+typedef _VoiceOp = int Function(Pointer<Void>, int);
+typedef _SetVolumeNative = Int32 Function(Pointer<Void>, Uint64, Float);
+typedef _SetVolume = int Function(Pointer<Void>, int, double);
+typedef _SetLoopNative = Int32 Function(Pointer<Void>, Uint64, Int32);
+typedef _SetLoop = int Function(Pointer<Void>, int, int);
+typedef _SeekNative = Int32 Function(Pointer<Void>, Uint64, Uint64);
+typedef _Seek = int Function(Pointer<Void>, int, int);
+typedef _I64QueryNative = Int64 Function(Pointer<Void>, Uint64);
+typedef _I64Query = int Function(Pointer<Void>, int);
+typedef _VoiceErrorNative = Pointer<Utf8> Function(Pointer<Void>, Uint64);
+typedef _VoiceError = Pointer<Utf8> Function(Pointer<Void>, int);
+typedef _LastErrorNative = Pointer<Utf8> Function();
+typedef _LastError = Pointer<Utf8> Function();
+
+// Voice state codes mirrored from the native side.
+const int _statePlaying = 0;
+const int _stateCompleted = 1;
+const int _stateStopped = 2;
+const int _stateError = 3;
+const int _statePaused = 4;
+
+/// Locates and opens the `sound_cli` shared library.
+class NativeLibrary {
+  /// Explicit path override, highest priority. Set before first use.
+  static String? overridePath;
+
+  static DynamicLibrary? _opened;
+  static bool _attempted = false;
+
+  static String get _fileName => switch (Platform.operatingSystem) {
+    'windows' => 'sound_cli.dll',
+    'macos' || 'ios' => 'libsound_cli.dylib',
+    _ => 'libsound_cli.so',
+  };
+
+  /// Opens the library, caching the result. Returns `null` if it cannot be
+  /// found/loaded - never throws.
+  static DynamicLibrary? open() {
+    if (_attempted) return _opened;
+    _attempted = true;
+    for (final candidate in _candidates()) {
+      try {
+        _opened = DynamicLibrary.open(candidate);
+        return _opened;
+      } on Object {
+        // Try the next candidate.
+      }
+    }
+    // On Apple platforms the symbols are -force_load'd into the plugin's
+    // framework, which is loaded into the host process for us - so process()
+    // resolves them even when DynamicLibrary.open cannot find the framework
+    // path directly.
+    if (Platform.isMacOS || Platform.isIOS) {
+      try {
+        final p = DynamicLibrary.process();
+        // Probe one expected symbol so we know FFI can actually find it.
+        p.lookup<NativeFunction<_PlayerNewNative>>('sound_player_new');
+        _opened = p;
+      } on Object {
+        // Fall through.
+      }
+    }
+    return _opened;
+  }
+
+  static Iterable<String> _candidates() sync* {
+    if (overridePath != null) yield overridePath!;
+    final fromEnv = Platform.environment['SOUND_DART_LIB'];
+    if (fromEnv != null && fromEnv.isNotEmpty) yield fromEnv;
+    // Resolved via the OS loader path / Flutter app bundle.
+    yield _fileName;
+    // On macOS/iOS the symbols are -force_load'd into the plugin's framework,
+    // so the lib name lookup above fails. The Flutter loader resolves the
+    // framework binary by its short path.
+    if (Platform.isMacOS || Platform.isIOS) {
+      yield 'sound_flutter.framework/sound_flutter';
+    }
+    // Developer builds of the in-repo crate, searched from the cwd upward.
+    var dir = Directory.current.absolute;
+    for (var i = 0; i < 6; i++) {
+      for (final profile in ['release', 'debug']) {
+        yield '${dir.path}/native/sound_cli/target/$profile/$_fileName';
+      }
+      final parent = dir.parent;
+      if (parent.path == dir.path) break;
+      dir = parent;
+    }
+  }
+}
+
+/// Bound entry points into the native library.
+class _Bindings {
+  _Bindings(DynamicLibrary lib)
+    : playerNew = lib.lookupFunction<_PlayerNewNative, _PlayerNewNative>(
+        'sound_player_new',
+      ),
+      playerFree = lib.lookupFunction<_PlayerFreeNative, _PlayerFree>(
+        'sound_player_free',
+      ),
+      playBytes = lib.lookupFunction<_PlayBytesNative, _PlayBytes>(
+        'sound_play_bytes',
+      ),
+      playFile = lib.lookupFunction<_PlayFileNative, _PlayFile>(
+        'sound_play_file',
+      ),
+      voiceState = lib.lookupFunction<_VoiceStateNative, _VoiceState>(
+        'sound_voice_state',
+      ),
+      stop = lib.lookupFunction<_VoiceOpNative, _VoiceOp>('sound_stop'),
+      setVolume = lib.lookupFunction<_SetVolumeNative, _SetVolume>(
+        'sound_set_volume',
+      ),
+      setLoop = lib.lookupFunction<_SetLoopNative, _SetLoop>('sound_set_loop'),
+      pause = lib.lookupFunction<_VoiceOpNative, _VoiceOp>('sound_pause'),
+      resume = lib.lookupFunction<_VoiceOpNative, _VoiceOp>('sound_resume'),
+      seek = lib.lookupFunction<_SeekNative, _Seek>('sound_seek'),
+      position = lib.lookupFunction<_I64QueryNative, _I64Query>(
+        'sound_position',
+      ),
+      durationFrames = lib.lookupFunction<_I64QueryNative, _I64Query>(
+        'sound_duration_frames',
+      ),
+      sampleRate = lib.lookupFunction<_VoiceStateNative, _VoiceState>(
+        'sound_sample_rate',
+      ),
+      voiceFree = lib.lookupFunction<_VoiceOpNative, _VoiceOp>(
+        'sound_voice_free',
+      ),
+      voiceError = lib.lookupFunction<_VoiceErrorNative, _VoiceError>(
+        'sound_voice_error',
+      ),
+      lastError = lib.lookupFunction<_LastErrorNative, _LastError>(
+        'sound_last_error',
+      );
+
+  final Pointer<Void> Function() playerNew;
+  final _PlayerFree playerFree;
+  final _PlayBytes playBytes;
+  final _PlayFile playFile;
+  final _VoiceState voiceState;
+  final _VoiceOp stop;
+  final _SetVolume setVolume;
+  final _SetLoop setLoop;
+  final _VoiceOp pause;
+  final _VoiceOp resume;
+  final _Seek seek;
+  final _I64Query position;
+  final _I64Query durationFrames;
+  final _VoiceState sampleRate;
+  final _VoiceOp voiceFree;
+  final _VoiceError voiceError;
+  final _LastError lastError;
+}
+
+/// Plays audio by calling the native `sound_cli` library over FFI.
+class FfiBackend extends SoundBackend {
+  _Bindings? _bindings;
+  Pointer<Void> _player = nullptr;
+  bool _available = false;
+  bool _probed = false;
+
+  @override
+  String get name => 'ffi';
+
+  @override
+  int get priority => 100;
+
+  @override
+  bool get isAvailable {
+    if (_probed) return _available;
+    _probed = true;
+    final lib = NativeLibrary.open();
+    if (lib == null) return _available = false;
+    try {
+      _bindings = _Bindings(lib);
+      _available = true;
+    } on Object {
+      _available = false;
+    }
+    return _available;
+  }
+
+  @override
+  Future<void> initialize() async {
+    if (!isAvailable) {
+      throw const NoBackendAvailableException(
+        'The sound_cli library could not be loaded.',
+      );
+    }
+    if (_player != nullptr) return;
+    _player = _bindings!.playerNew();
+    if (_player == nullptr) {
+      throw PlaybackException('sound_player_new failed: ${_lastError()}');
+    }
+  }
+
+  String _lastError() {
+    final ptr = _bindings!.lastError();
+    return ptr == nullptr ? 'unknown error' : ptr.toDartString();
+  }
+
+  @override
+  Future<Playback> load(
+    SoundSource source, {
+    double volume = 1.0,
+    bool loop = false,
+  }) async {
+    if (_player == nullptr) await initialize();
+    return FfiPlayback._(this, source, volume, loop);
+  }
+
+  @override
+  Future<void> dispose() async {
+    if (_player != nullptr) {
+      _bindings!.playerFree(_player);
+      _player = nullptr;
+    }
+  }
+}
+
+/// A single FFI-backed voice. Created idle; [play] starts a native voice and
+/// polls its state to resolve [onComplete].
+class FfiPlayback implements Playback {
+  FfiPlayback._(this._backend, this._source, this._volume, this._looping);
+
+  final FfiBackend _backend;
+  final SoundSource _source;
+
+  double _volume;
+  bool _looping;
+  int _voiceId = 0;
+  int _rate = 0;
+  int _durationFrames = 0;
+  PlaybackState _state = PlaybackState.idle;
+  Timer? _poll;
+  Completer<void>? _completer;
+
+  _Bindings get _b => _backend._bindings!;
+  Pointer<Void> get _player => _backend._player;
+
+  @override
+  PlaybackState get state => _state;
+
+  @override
+  bool get isPlaying => _state == PlaybackState.playing;
+
+  @override
+  Future<void> get onComplete => (_completer ??= Completer<void>()).future;
+
+  @override
+  Future<void> play() async {
+    if (_state == PlaybackState.disposed) return;
+    _freeVoice();
+    _completer = Completer<void>();
+    _voiceId = _start();
+    if (_voiceId == 0) {
+      _state = PlaybackState.idle;
+      throw PlaybackException('playback failed: ${_backend._lastError()}');
+    }
+    if (_volume != 1.0) _b.setVolume(_player, _voiceId, _volume);
+    _rate = _b.sampleRate(_player, _voiceId);
+    _durationFrames = _b.durationFrames(_player, _voiceId);
+    _state = PlaybackState.playing;
+    _poll = Timer.periodic(
+      const Duration(milliseconds: 50),
+      (_) => _checkState(),
+    );
+  }
+
+  int _start() {
+    final loopFlag = _looping ? 1 : 0;
+    switch (_source) {
+      case BytesSource(:final bytes, :final format):
+        final buf = malloc<Uint8>(bytes.length);
+        final cFormat = format == null ? nullptr : format.toNativeUtf8();
+        try {
+          buf.asTypedList(bytes.length).setAll(0, bytes);
+          // The native side decodes synchronously before returning, so the
+          // buffers are safe to free immediately afterward.
+          return _b.playBytes(_player, buf, bytes.length, cFormat, loopFlag);
+        } finally {
+          malloc.free(buf);
+          if (cFormat != nullptr) malloc.free(cFormat);
+        }
+      case FileSource(:final path):
+        final cPath = path.toNativeUtf8();
+        try {
+          return _b.playFile(_player, cPath, loopFlag);
+        } finally {
+          malloc.free(cPath);
+        }
+    }
+  }
+
+  void _checkState() {
+    if (_voiceId == 0) return;
+    final native = _b.voiceState(_player, _voiceId);
+    switch (native) {
+      case _statePlaying:
+        _state = PlaybackState.playing;
+      case _statePaused:
+        _state = PlaybackState.paused;
+      case _stateCompleted:
+        _finish(PlaybackState.completed, complete: true);
+      case _stateStopped:
+        _finish(PlaybackState.stopped, complete: false);
+      case _stateError:
+        final msg = _b.voiceError(_player, _voiceId);
+        _finish(PlaybackState.stopped, complete: false);
+        _completer?.completeError(
+          PlaybackException(
+            msg == nullptr ? 'playback error' : msg.toDartString(),
+          ),
+        );
+      default: // -1 unknown
+        _finish(PlaybackState.stopped, complete: false);
+    }
+  }
+
+  void _finish(PlaybackState state, {required bool complete}) {
+    _poll?.cancel();
+    _poll = null;
+    _state = state;
+    if (complete && _completer != null && !_completer!.isCompleted) {
+      _completer!.complete();
+    }
+  }
+
+  @override
+  Future<void> stop() async {
+    if (_voiceId != 0) {
+      _b.stop(_player, _voiceId);
+      // Reflect the request immediately; the poll will confirm.
+      if (_state == PlaybackState.playing) _state = PlaybackState.stopped;
+    }
+    _poll?.cancel();
+    _poll = null;
+  }
+
+  @override
+  Future<void> setVolume(double volume) async {
+    _volume = volume;
+    if (_voiceId != 0) _b.setVolume(_player, _voiceId, volume);
+  }
+
+  @override
+  Future<void> setLooping(bool looping) async {
+    _looping = looping;
+    if (_voiceId != 0) _b.setLoop(_player, _voiceId, looping ? 1 : 0);
+  }
+
+  @override
+  Future<void> pause() async {
+    if (_voiceId != 0) {
+      _b.pause(_player, _voiceId);
+      _state = PlaybackState.paused;
+    }
+  }
+
+  @override
+  Future<void> resume() async {
+    if (_voiceId != 0) {
+      _b.resume(_player, _voiceId);
+      _state = PlaybackState.playing;
+    }
+  }
+
+  @override
+  Future<void> seek(Duration position) async {
+    if (_voiceId != 0 && _rate > 0) {
+      final frame = position.inMicroseconds * _rate ~/ 1000000;
+      _b.seek(_player, _voiceId, frame < 0 ? 0 : frame);
+    }
+  }
+
+  @override
+  Duration get position {
+    if (_voiceId == 0 || _rate <= 0) return Duration.zero;
+    final frames = _b.position(_player, _voiceId);
+    if (frames < 0) return Duration.zero;
+    return Duration(microseconds: frames * 1000000 ~/ _rate);
+  }
+
+  @override
+  Duration? get duration {
+    if (_durationFrames <= 0 || _rate <= 0) return null;
+    return Duration(microseconds: _durationFrames * 1000000 ~/ _rate);
+  }
+
+  void _freeVoice() {
+    _poll?.cancel();
+    _poll = null;
+    if (_voiceId != 0) {
+      _b.voiceFree(_player, _voiceId);
+      _voiceId = 0;
+    }
+  }
+
+  @override
+  Future<void> dispose() async {
+    _freeVoice();
+    _state = PlaybackState.disposed;
+    if (_completer != null && !_completer!.isCompleted) _completer!.complete();
+  }
+}
