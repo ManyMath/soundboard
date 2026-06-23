@@ -613,6 +613,152 @@ pub extern "C" fn sound_last_error() -> *const c_char {
     LAST_ERROR.with(|e| e.borrow().as_ptr())
 }
 
+// ---------------------------------------------------------------------------
+// Decode-to-PCM (for the sound_dart PCM tap)
+// ---------------------------------------------------------------------------
+
+/// A decoded interleaved S16LE buffer handed to the Dart PCM tap.
+///
+/// This is decoupled from playback: it never opens an audio device, so the
+/// frames can be pulled (for example to mix a clip into a capture stream)
+/// without any speaker output. It reuses the same `decode` path the playback
+/// functions use.
+pub struct Decoded {
+    samples: Vec<i16>,
+    channels: u32,
+    rate: u32,
+}
+
+/// Decodes encoded audio bytes (WAV/MP3/OGG/FLAC, auto-detected) into an opaque
+/// [Decoded] buffer. Returns null on error; see [sound_last_error].
+///
+/// # Safety
+/// `data` must point to `len` readable bytes. `format` is an optional
+/// NUL-terminated extension hint (e.g. "mp3"); pass null to auto-detect. Free
+/// the result with [sound_decoded_free].
+#[no_mangle]
+pub unsafe extern "C" fn sound_decode_bytes(
+    data: *const u8,
+    len: usize,
+    format: *const c_char,
+) -> *mut Decoded {
+    if data.is_null() {
+        set_last_error("null data");
+        return std::ptr::null_mut();
+    }
+    let bytes = std::slice::from_raw_parts(data, len);
+    let hint = if format.is_null() {
+        None
+    } else {
+        CStr::from_ptr(format).to_str().ok()
+    };
+    match decode::decode_bytes(bytes, hint) {
+        Ok(a) => Box::into_raw(Box::new(Decoded {
+            samples: a.samples,
+            channels: a.channels,
+            rate: a.rate,
+        })),
+        Err(e) => {
+            set_last_error(e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Decodes an audio file (format auto-detected) into an opaque [Decoded]
+/// buffer. Returns null on error; see [sound_last_error].
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string. Free the result with
+/// [sound_decoded_free].
+#[no_mangle]
+pub unsafe extern "C" fn sound_decode_file(path: *const c_char) -> *mut Decoded {
+    if path.is_null() {
+        set_last_error("null path");
+        return std::ptr::null_mut();
+    }
+    let path = match CStr::from_ptr(path).to_str() {
+        Ok(p) => p,
+        Err(_) => {
+            set_last_error("path is not valid UTF-8");
+            return std::ptr::null_mut();
+        }
+    };
+    match decode::decode_file(path) {
+        Ok(a) => Box::into_raw(Box::new(Decoded {
+            samples: a.samples,
+            channels: a.channels,
+            rate: a.rate,
+        })),
+        Err(e) => {
+            set_last_error(e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Returns the number of interleaved samples in a [Decoded] buffer, or -1 if
+/// the handle is null.
+#[no_mangle]
+pub extern "C" fn sound_decoded_len(d: *const Decoded) -> i64 {
+    if d.is_null() {
+        return -1;
+    }
+    unsafe { &*d }.samples.len() as i64
+}
+
+/// Returns a [Decoded] buffer's channel count, or -1 if the handle is null.
+#[no_mangle]
+pub extern "C" fn sound_decoded_channels(d: *const Decoded) -> c_int {
+    if d.is_null() {
+        return -1;
+    }
+    unsafe { &*d }.channels as c_int
+}
+
+/// Returns a [Decoded] buffer's sample rate in Hz, or -1 if the handle is null.
+#[no_mangle]
+pub extern "C" fn sound_decoded_rate(d: *const Decoded) -> c_int {
+    if d.is_null() {
+        return -1;
+    }
+    unsafe { &*d }.rate as c_int
+}
+
+/// Copies up to `cap` interleaved samples, starting at interleaved sample index
+/// `start`, from `d` into `out`. Returns the number of samples copied, 0 past
+/// the end, or -1 if a handle is null.
+///
+/// # Safety
+/// `out` must point to space for at least `cap` `i16` values.
+#[no_mangle]
+pub unsafe extern "C" fn sound_decoded_copy(
+    d: *const Decoded,
+    start: usize,
+    out: *mut i16,
+    cap: usize,
+) -> isize {
+    if d.is_null() || out.is_null() {
+        return -1;
+    }
+    let d = &*d;
+    if start >= d.samples.len() {
+        return 0;
+    }
+    let n = cap.min(d.samples.len() - start);
+    std::ptr::copy_nonoverlapping(d.samples.as_ptr().add(start), out, n);
+    n as isize
+}
+
+/// Frees a [Decoded] buffer returned by [sound_decode_bytes] or
+/// [sound_decode_file].
+#[no_mangle]
+pub extern "C" fn sound_decoded_free(d: *mut Decoded) {
+    if !d.is_null() {
+        drop(unsafe { Box::from_raw(d) });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,5 +793,34 @@ mod tests {
         assert_eq!(audio.channels, 1);
         assert_eq!(audio.rate, 44_100);
         assert_eq!(audio.samples.len(), 4_410);
+    }
+
+    #[test]
+    fn decode_ffi_round_trips_wav() {
+        let bytes = sine_wav();
+        let fmt = CString::new("wav").unwrap();
+        let d = unsafe { sound_decode_bytes(bytes.as_ptr(), bytes.len(), fmt.as_ptr()) };
+        assert!(!d.is_null());
+        assert_eq!(sound_decoded_channels(d), 1);
+        assert_eq!(sound_decoded_rate(d), 44_100);
+        let len = sound_decoded_len(d);
+        assert_eq!(len, 4_410);
+        // Copy the whole buffer out, as the Dart tap does.
+        let mut buf = vec![0i16; len as usize];
+        let n = unsafe { sound_decoded_copy(d, 0, buf.as_mut_ptr(), buf.len()) };
+        assert_eq!(n, len as isize);
+        // A copy starting past the end yields nothing.
+        assert_eq!(
+            unsafe { sound_decoded_copy(d, len as usize, buf.as_mut_ptr(), buf.len()) },
+            0
+        );
+        sound_decoded_free(d);
+    }
+
+    #[test]
+    fn decode_ffi_rejects_garbage() {
+        let garbage = [0u8; 64];
+        let d = unsafe { sound_decode_bytes(garbage.as_ptr(), garbage.len(), std::ptr::null()) };
+        assert!(d.is_null());
     }
 }

@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
 import '../../exceptions.dart';
+import '../../pcm_stream.dart';
 import '../../playback.dart';
 import '../../sound_backend.dart';
 import '../../sound_source.dart';
@@ -39,6 +41,22 @@ typedef _VoiceErrorNative = Pointer<Utf8> Function(Pointer<Void>, Uint64);
 typedef _VoiceError = Pointer<Utf8> Function(Pointer<Void>, int);
 typedef _LastErrorNative = Pointer<Utf8> Function();
 typedef _LastError = Pointer<Utf8> Function();
+// Decode-to-PCM (the PCM tap), mirroring native/sound_cli/src/lib.rs.
+typedef _DecodeBytesNative =
+    Pointer<Void> Function(Pointer<Uint8>, Size, Pointer<Utf8>);
+typedef _DecodeBytes =
+    Pointer<Void> Function(Pointer<Uint8>, int, Pointer<Utf8>);
+typedef _DecodeFileNative = Pointer<Void> Function(Pointer<Utf8>);
+typedef _DecodeFile = Pointer<Void> Function(Pointer<Utf8>);
+typedef _DecodedLenNative = Int64 Function(Pointer<Void>);
+typedef _DecodedLen = int Function(Pointer<Void>);
+typedef _DecodedIntNative = Int32 Function(Pointer<Void>);
+typedef _DecodedInt = int Function(Pointer<Void>);
+typedef _DecodedCopyNative =
+    IntPtr Function(Pointer<Void>, Size, Pointer<Int16>, Size);
+typedef _DecodedCopy = int Function(Pointer<Void>, int, Pointer<Int16>, int);
+typedef _DecodedFreeNative = Void Function(Pointer<Void>);
+typedef _DecodedFree = void Function(Pointer<Void>);
 
 // Voice state codes mirrored from the native side.
 const int _statePlaying = 0;
@@ -159,6 +177,27 @@ class _Bindings {
       ),
       lastError = lib.lookupFunction<_LastErrorNative, _LastError>(
         'sound_last_error',
+      ),
+      decodeBytes = lib.lookupFunction<_DecodeBytesNative, _DecodeBytes>(
+        'sound_decode_bytes',
+      ),
+      decodeFile = lib.lookupFunction<_DecodeFileNative, _DecodeFile>(
+        'sound_decode_file',
+      ),
+      decodedLen = lib.lookupFunction<_DecodedLenNative, _DecodedLen>(
+        'sound_decoded_len',
+      ),
+      decodedChannels = lib.lookupFunction<_DecodedIntNative, _DecodedInt>(
+        'sound_decoded_channels',
+      ),
+      decodedRate = lib.lookupFunction<_DecodedIntNative, _DecodedInt>(
+        'sound_decoded_rate',
+      ),
+      decodedCopy = lib.lookupFunction<_DecodedCopyNative, _DecodedCopy>(
+        'sound_decoded_copy',
+      ),
+      decodedFree = lib.lookupFunction<_DecodedFreeNative, _DecodedFree>(
+        'sound_decoded_free',
       );
 
   final Pointer<Void> Function() playerNew;
@@ -178,10 +217,21 @@ class _Bindings {
   final _VoiceOp voiceFree;
   final _VoiceError voiceError;
   final _LastError lastError;
+  final _DecodeBytes decodeBytes;
+  final _DecodeFile decodeFile;
+  final _DecodedLen decodedLen;
+  final _DecodedInt decodedChannels;
+  final _DecodedInt decodedRate;
+  final _DecodedCopy decodedCopy;
+  final _DecodedFree decodedFree;
 }
 
 /// Plays audio by calling the native `sound_cli` library over FFI.
-class FfiBackend extends SoundBackend {
+///
+/// It also implements [PcmTap]: the native decoder can hand back decoded PCM
+/// without opening an audio device, which is how a clip is routed into a
+/// capture stream instead of the speakers.
+class FfiBackend extends SoundBackend implements PcmTap {
   _Bindings? _bindings;
   Pointer<Void> _player = nullptr;
   bool _available = false;
@@ -235,6 +285,78 @@ class FfiBackend extends SoundBackend {
   }) async {
     if (_player == nullptr) await initialize();
     return FfiPlayback._(this, source, volume, loop);
+  }
+
+  @override
+  Future<PcmStream> openPcmStream(
+    SoundSource source, {
+    int chunkFrames = 2048,
+    bool loop = false,
+  }) async {
+    if (!isAvailable) {
+      throw const NoBackendAvailableException(
+        'The sound_cli library could not be loaded.',
+      );
+    }
+    return _decode(source, chunkFrames: chunkFrames, loop: loop);
+  }
+
+  /// Decodes [source] to interleaved S16LE via the native decoder (no audio
+  /// device) and copies the samples into a Dart-owned [PcmStream].
+  PcmStream _decode(
+    SoundSource source, {
+    required int chunkFrames,
+    required bool loop,
+  }) {
+    final b = _bindings!;
+    final Pointer<Void> decoded;
+    switch (source) {
+      case BytesSource(:final bytes, :final format):
+        final buf = malloc<Uint8>(bytes.length);
+        final cFormat = format == null ? nullptr : format.toNativeUtf8();
+        try {
+          buf.asTypedList(bytes.length).setAll(0, bytes);
+          decoded = b.decodeBytes(buf, bytes.length, cFormat);
+        } finally {
+          malloc.free(buf);
+          if (cFormat != nullptr) malloc.free(cFormat);
+        }
+      case FileSource(:final path):
+        final cPath = path.toNativeUtf8();
+        try {
+          decoded = b.decodeFile(cPath);
+        } finally {
+          malloc.free(cPath);
+        }
+    }
+    if (decoded == nullptr) {
+      throw UnsupportedSourceException('decode failed: ${_lastError()}');
+    }
+    try {
+      final len = b.decodedLen(decoded);
+      final channels = b.decodedChannels(decoded);
+      final rate = b.decodedRate(decoded);
+      if (len <= 0 || channels <= 0 || rate <= 0) {
+        throw const UnsupportedSourceException('decoded zero audio frames');
+      }
+      final out = malloc<Int16>(len);
+      try {
+        final n = b.decodedCopy(decoded, 0, out, len);
+        final count = n < 0 ? 0 : n;
+        final samples = Int16List(count)..setAll(0, out.asTypedList(count));
+        return PcmStream(
+          samples: samples,
+          channels: channels,
+          sampleRate: rate,
+          chunkFrames: chunkFrames,
+          loop: loop,
+        );
+      } finally {
+        malloc.free(out);
+      }
+    } finally {
+      b.decodedFree(decoded);
+    }
   }
 
   @override
