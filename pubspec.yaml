@@ -17,6 +17,7 @@ environment:
 workspace:
   - sound/packages/sound_dart
   - microphone/packages/microphone_dart
+  - packages/soundboard
 
 dev_dependencies:
   melos: ^7.0.0
@@ -33,23 +34,27 @@ melos:
         dart analyze
         sound/packages/sound_dart
         microphone/packages/microphone_dart
+        packages/soundboard
     format:
       description: Check Dart formatting.
       run: >-
         dart format --output none --set-exit-if-changed
         sound/packages/sound_dart
         microphone/packages/microphone_dart
+        packages/soundboard
     format:fix:
       description: Apply Dart formatting.
       run: >-
         dart format
         sound/packages/sound_dart
         microphone/packages/microphone_dart
+        packages/soundboard
     test:
       description: Run Dart tests.
       run: >-
         dart test sound/packages/sound_dart &&
-        dart test microphone/packages/microphone_dart
+        dart test microphone/packages/microphone_dart &&
+        dart test packages/soundboard
     native:build:
       description: Build the vendored shared libraries (for CLI/dev use).
       run: >-

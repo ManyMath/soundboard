@@ -1,0 +1,27 @@
+name: soundboard
+description: >-
+  Route and mix played sound into a microphone capture stream. Pure Dart on top
+  of sound_dart and microphone_dart, with the goal of no additional system
+  dependencies.
+version: 0.0.1
+publish_to: none
+repository: https://github.com/ManyMath/soundboard
+topics:
+  - audio
+  - microphone
+  - sound
+  - mixer
+
+environment:
+  sdk: ^3.10.0
+
+resolution: workspace
+
+dependencies:
+  # Resolved to the vendored packages by the top-level pub workspace.
+  microphone_dart: ^0.0.1
+  sound_dart: ^0.0.1
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.0
