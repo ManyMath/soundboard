@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'backends/native/native_backend.dart';
 import 'backends/silent_backend.dart';
 import 'exceptions.dart';
+import 'pcm_stream.dart';
 import 'playback.dart';
 import 'sound_backend.dart';
 import 'sound_source.dart';
@@ -188,6 +189,40 @@ class Sound {
     final slash = path.lastIndexOf('/');
     if (dot < 0 || dot < slash || dot == path.length - 1) return null;
     return path.substring(dot + 1).toLowerCase();
+  }
+
+  /// Opens a [PcmStream] of [source]'s decoded interleaved S16LE frames without
+  /// playing it through an audio device.
+  ///
+  /// This routes a clip's samples somewhere other than the speakers -- for
+  /// example into a microphone capture stream. It uses the active backend when
+  /// it is a [PcmTap] (the FFI backend on native), otherwise the
+  /// highest-priority registered backend that supports tapping (the silent
+  /// fallback always does). [chunkFrames] sizes each emitted chunk; [loop]
+  /// repeats the buffer.
+  static Future<PcmStream> openPcmStream(
+    SoundSource source, {
+    int chunkFrames = 2048,
+    bool loop = false,
+  }) {
+    final tap = _selectTap();
+    return tap.openPcmStream(source, chunkFrames: chunkFrames, loop: loop);
+  }
+
+  /// Picks a backend that can tap PCM: the active one if it can, else the
+  /// highest-priority available [PcmTap].
+  static PcmTap _selectTap() {
+    _ensureDefaults();
+    final active = backend;
+    if (active is PcmTap) return active as PcmTap;
+    final taps = _backends.where((b) => b.isAvailable && b is PcmTap).toList()
+      ..sort((a, b) => b.priority.compareTo(a.priority));
+    if (taps.isEmpty) {
+      throw const UnsupportedSourceException(
+        'No registered backend supports a PCM tap.',
+      );
+    }
+    return taps.first as PcmTap;
   }
 
   /// Disposes the active backend and clears selection/registry.
