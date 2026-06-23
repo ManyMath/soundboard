@@ -18,6 +18,9 @@ environment:
 resolution: workspace
 
 dependencies:
+  # For the macOS CoreAudio virtual-mic FFI (coreaudio.dart). Already in the
+  # workspace via sound_dart, so this adds no new package to the project.
+  ffi: ^2.1.0
   # Resolved to the vendored packages by the top-level pub workspace.
   microphone_dart: ^0.0.1
   sound_dart: ^0.0.1
