@@ -1,0 +1,11 @@
+include: package:lints/recommended.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-raw-types: true
+  exclude:
+    # The vendored monorepos carry their own analysis_options and are analyzed
+    # in place by the melos scripts; do not double-analyze them from the root.
+    - sound/**
+    - microphone/**
