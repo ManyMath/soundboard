@@ -24,7 +24,8 @@ clips, mixed.
 
 This works on every platform the upstream packages already support, with no OS
 driver. The longer-term goal -- an OS-level virtual microphone device selectable
-by other apps (Zoom, Discord, browsers) -- is future work.
+by other apps (Zoom, Discord, browsers) -- has a working **Linux/PipeWire**
+prototype (`package:soundboard/pipewire.dart`, `PipeWireVirtualMic`).
 
 ## Layout
 

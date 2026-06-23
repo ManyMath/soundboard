@@ -62,6 +62,34 @@ native libraries that actually decode audio and capture the microphone in a
 Flutter app, also depend on `sound_flutter` and `microphone_flutter` (they build
 the Rust libraries via cargokit) and call their `ensureInitialized()` helpers.
 
+## Linux: a real virtual microphone device
+
+On Linux with PipeWire (the default on modern Ubuntu), the soundboard can be
+published as a virtual microphone **device** that other apps -- Zoom, Discord, a
+browser -- select from their own input menus, with no integration on their part.
+
+```dart
+import 'package:soundboard/soundboard.dart';
+import 'package:soundboard/pipewire.dart';
+
+const fmt = CaptureFormat(sampleRate: 48000, channels: 1);
+final board = Soundboard(format: fmt);
+
+final recording = await board.asMicrophoneBackend().startRecording(format: fmt);
+final vmic = await PipeWireVirtualMic.create(name: 'Soundboard', format: fmt);
+await vmic.feed(recording.frames); // stream mic + clips into the device
+
+// ... board.play(clip) ... the app hears it on the "Soundboard" mic ...
+
+await vmic.dispose(); // removes the device
+```
+
+It uses the `pw-loopback` and `pw-cat` tools that ship with PipeWire (no
+PulseAudio CLI, no kernel driver, no pub dependency), and the device exists only
+while your process runs. `PipeWireVirtualMic.isSupported()` checks the
+environment first. See `example/linux_virtual_mic.dart`
+(`dart run example/linux_virtual_mic.dart`).
+
 ## Limitations (Phase 1)
 
 - Clips are not resampled: a clip should be at the soundboard's `format` sample
