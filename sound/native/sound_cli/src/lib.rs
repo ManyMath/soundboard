@@ -21,6 +21,10 @@ mod aaudio;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod coreaudio;
 
+// The macOS output sink (feeds a named device, e.g. a virtual-mic loopback).
+#[cfg(target_os = "macos")]
+mod sink;
+
 #[cfg(target_os = "windows")]
 mod winmm;
 
@@ -757,6 +761,108 @@ pub extern "C" fn sound_decoded_free(d: *mut Decoded) {
     if !d.is_null() {
         drop(unsafe { Box::from_raw(d) });
     }
+}
+
+// ---------------------------------------------------------------------------
+// CoreAudio output sink (macOS virtual-microphone feeder)
+// ---------------------------------------------------------------------------
+//
+// Opens a CoreAudio output on a NAMED device (looked up by name or UID through
+// the HAL) and accepts caller-pushed interleaved S16LE frames, converting them
+// to the device's Float32 format. The Dart `CoreAudioVirtualMic` writes the
+// soundboard mix here and a loopback device (BlackHole, or an own-brand driver)
+// presents it as a microphone other apps can select.
+//
+// This has its own error slot (`sound_sink_last_error`) so a sink failure does
+// not race the playback path's `sound_last_error`.
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    static SINK_LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
+}
+
+#[cfg(target_os = "macos")]
+fn set_sink_error(msg: impl Into<String>) {
+    let c = CString::new(msg.into()).unwrap_or_default();
+    SINK_LAST_ERROR.with(|e| *e.borrow_mut() = c);
+}
+
+/// Opens an output sink on the device named (or UID'd) by `device`, accepting
+/// `channels`-channel interleaved S16LE frames at `rate` Hz. Returns an opaque
+/// sink, or null on error; see [sound_sink_last_error].
+///
+/// # Safety
+/// `device` must be a valid NUL-terminated C string.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn sound_sink_open(
+    device: *const c_char,
+    rate: u32,
+    channels: u32,
+) -> *mut sink::Sink {
+    if device.is_null() {
+        set_sink_error("null device name");
+        return std::ptr::null_mut();
+    }
+    let name = match CStr::from_ptr(device).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_sink_error("device name is not valid UTF-8");
+            return std::ptr::null_mut();
+        }
+    };
+    match sink::Sink::open(name, rate, channels) {
+        Ok(s) => Box::into_raw(Box::new(s)),
+        Err(e) => {
+            set_sink_error(e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Queues `len` interleaved S16LE samples for the device. Returns the number of
+/// source frames queued, or -1 on error; see [sound_sink_last_error].
+///
+/// # Safety
+/// `sink` must be a sink from [sound_sink_open]; `samples` must point to `len`
+/// readable `i16` values.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn sound_sink_write(
+    sink: *mut sink::Sink,
+    samples: *const i16,
+    len: usize,
+) -> i32 {
+    if sink.is_null() || samples.is_null() {
+        set_sink_error("null sink or samples");
+        return -1;
+    }
+    let sink = &*sink;
+    let slice = std::slice::from_raw_parts(samples, len);
+    match sink.write(slice) {
+        Ok(frames) => frames as i32,
+        Err(e) => {
+            set_sink_error(e);
+            -1
+        }
+    }
+}
+
+/// Closes and frees a sink from [sound_sink_open].
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn sound_sink_close(sink: *mut sink::Sink) {
+    if !sink.is_null() {
+        drop(unsafe { Box::from_raw(sink) });
+    }
+}
+
+/// Returns the last sink error on this thread as a NUL-terminated C string. The
+/// pointer is valid until the next sink call on the same thread.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn sound_sink_last_error() -> *const c_char {
+    SINK_LAST_ERROR.with(|e| e.borrow().as_ptr())
 }
 
 #[cfg(test)]
