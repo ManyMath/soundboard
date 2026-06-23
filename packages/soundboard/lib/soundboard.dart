@@ -8,8 +8,22 @@
 /// The entry point is [Soundboard]; see its [Soundboard.asMicrophoneBackend].
 library;
 
+// Re-export the capture-side pieces a soundboard consumer needs. (The silent
+// and no-backend symbols are intentionally omitted: both upstream packages
+// define their own, so exporting them here would clash.)
 export 'package:microphone_dart/microphone_dart.dart'
-    show CaptureBackend, CaptureFormat, SampleFormat;
+    show
+        AudioLevel,
+        CaptureBackend,
+        CaptureDevice,
+        CaptureFormat,
+        Microphone,
+        MixingCaptureBackend,
+        Recording,
+        RecordingLevels,
+        RecordingState,
+        SampleFormat,
+        StreamCaptureBackend;
 
 export 'src/clip.dart';
 export 'src/soundboard.dart';
