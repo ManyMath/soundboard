@@ -1,0 +1,26 @@
+name: microphone_dart
+description: >-
+  Microphone recording for Dart and Flutter with the goal of no additional 
+  system dependencies.  Dart (no Flutter dependency) with native audio from 
+  Rust via FFI.
+version: 0.0.1
+repository: https://github.com/ManyMath/microphone
+issue_tracker: https://github.com/ManyMath/microphone/issues
+topics:
+  - audio
+  - microphone
+  - recording
+  - ffi
+
+environment:
+  sdk: ^3.10.0
+
+resolution: workspace
+
+dependencies:
+  ffi: ^2.1.0
+  web: ^1.1.0
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.0

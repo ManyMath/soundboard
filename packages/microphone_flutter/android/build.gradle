@@ -1,0 +1,60 @@
+// The Android Gradle Plugin builds the native code with the Android NDK.
+
+group = "com.manymath.microphone_flutter"
+version = "1.0"
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        // The Android Gradle Plugin knows how to build native code with the NDK.
+        classpath("com.android.tools.build:gradle:8.11.1")
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: "com.android.library"
+
+android {
+    namespace = "com.manymath.microphone_flutter"
+
+    // Bumping the plugin compileSdk version requires all clients of this plugin
+    // to bump the version in their app.
+    compileSdk = 36
+
+    // Use the NDK version
+    // declared in /android/app/build.gradle file of the Flutter project.
+    // Replace it with a version number if this plugin requires a specific NDK version.
+    // (e.g. ndkVersion "23.1.7779620")
+    ndkVersion = android.ndkVersion
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    defaultConfig {
+        // AAudio (used by microphone for input capture) requires API 26+.
+        minSdk = 26
+    }
+}
+
+// Build the shared `microphone` Rust crate via cargokit. The crate lives at the
+// repo root, shared with the pure-Dart `microphone_dart` package; cargokit
+// drops the per-ABI libmicrophone.so into jniLibs so it is packaged in the
+// APK and resolvable by DynamicLibrary.open('libmicrophone.so').
+apply from: "../cargokit/gradle/plugin.gradle"
+
+cargokit {
+    manifestDir = "../../../native/microphone"
+    libname = "microphone"
+}
