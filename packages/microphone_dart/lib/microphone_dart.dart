@@ -6,7 +6,9 @@
 /// the entry point.
 library;
 
+export 'src/backends/mixing_backend.dart';
 export 'src/backends/silent_backend.dart';
+export 'src/backends/stream_backend.dart';
 export 'src/capture_backend.dart';
 export 'src/capture_device.dart';
 export 'src/capture_format.dart';
