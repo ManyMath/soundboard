@@ -4,6 +4,12 @@
 //! decodes the audio and spawns a playback thread, returning an opaque voice
 //! id that can be polled, stopped, and freed. Concurrent voices are mixed by
 //! the system audio server (PipeWire/PulseAudio/dmix on Linux).
+//!
+//! `sound_play_url` streams its source rather than decoding it up front: a
+//! background thread pulls bytes from the network (`net`/`streaming_source`)
+//! while `decode`'s `StreamDecoder` decodes packets as they arrive and
+//! `play_pcm` consumes them from a growing [`LiveBuffer`], so playback can
+//! start before the whole file has downloaded.
 
 // The exported functions take the opaque `*mut Player` returned by
 // `sound_player_new`; the caller is responsible for its validity. That makes
@@ -11,6 +17,8 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 mod decode;
+mod net;
+mod streaming_source;
 
 #[cfg(target_os = "linux")]
 mod alsa;
@@ -44,7 +52,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, O
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use decode::DecodedAudio;
+use decode::{DecodedAudio, StreamDecoder};
 
 // Voice state codes, mirrored by the Dart side.
 const STATE_PLAYING: u8 = 0;
@@ -52,6 +60,11 @@ const STATE_COMPLETED: u8 = 1;
 const STATE_STOPPED: u8 = 2;
 const STATE_ERROR: u8 = 3;
 const STATE_PAUSED: u8 = 4;
+/// A [sound_play_url] voice that has been created but hasn't yet connected,
+/// probed the format, and decoded a first chunk - all of which happen on its
+/// background thread rather than blocking [sound_play_url] itself. Callers
+/// polling [sound_voice_state] see this before [STATE_PLAYING].
+const STATE_CONNECTING: u8 = 5;
 
 // Sentinel for "no seek pending" in the seek_request slot.
 const NO_SEEK: i64 = -1;
@@ -97,10 +110,106 @@ impl VoiceShared {
     }
 }
 
+/// Interleaved S16LE samples fed by a concurrent decode thread (for
+/// [`sound_play_url`]) rather than fully available up front. `play_pcm`
+/// blocks on [Condvar] when it catches up to the decode thread, and stops
+/// treating "index == len" as end-of-stream until `final_len` is set.
+struct LiveBuffer {
+    state: Mutex<LiveBufferState>,
+    ready: std::sync::Condvar,
+}
+
+struct LiveBufferState {
+    samples: Vec<i16>,
+    /// Set once decoding finishes (successfully) with the true sample count;
+    /// `None` while still growing.
+    final_len: Option<usize>,
+    /// Set if decoding failed after producing `samples`.
+    error: Option<String>,
+}
+
+impl LiveBuffer {
+    fn new() -> Arc<LiveBuffer> {
+        Arc::new(LiveBuffer {
+            state: Mutex::new(LiveBufferState {
+                samples: Vec::new(),
+                final_len: None,
+                error: None,
+            }),
+            ready: std::sync::Condvar::new(),
+        })
+    }
+
+    fn push(&self, chunk: &[i16]) {
+        let mut state = self.state.lock().unwrap();
+        state.samples.extend_from_slice(chunk);
+        self.ready.notify_all();
+    }
+
+    fn finish(&self, error: Option<String>) {
+        let mut state = self.state.lock().unwrap();
+        state.final_len = Some(state.samples.len());
+        state.error = error;
+        self.ready.notify_all();
+    }
+
+    /// Blocks until at least `upto` samples are available, decoding has
+    /// finished, or decoding has failed.
+    fn wait_until(&self, upto: usize) {
+        let mut state = self.state.lock().unwrap();
+        while state.samples.len() < upto && state.final_len.is_none() {
+            state = self.ready.wait(state).unwrap();
+        }
+    }
+}
+
+/// Either a complete, already-decoded buffer (bytes/file playback) or one
+/// still being filled by a concurrent decode thread (URL playback). Lets
+/// [play_pcm] serve both without duplicating the chunk/gain/seek/loop logic.
+enum Samples {
+    Complete(Vec<i16>),
+    Live(Arc<LiveBuffer>),
+}
+
+impl Samples {
+    /// Blocks until at least `upto` samples exist or no more are coming,
+    /// then returns the number currently available and whether that number
+    /// is final (no more will ever be produced).
+    fn wait_len(&self, upto: usize) -> (usize, bool) {
+        match self {
+            Samples::Complete(v) => (v.len(), true),
+            Samples::Live(live) => {
+                live.wait_until(upto);
+                let state = live.state.lock().unwrap();
+                (state.samples.len(), state.final_len.is_some())
+            }
+        }
+    }
+
+    /// Copies `range` into `out`. Panics if the range isn't yet available;
+    /// callers must `wait_len` first.
+    fn copy_range(&self, range: std::ops::Range<usize>, out: &mut Vec<i16>) {
+        match self {
+            Samples::Complete(v) => out.extend_from_slice(&v[range]),
+            Samples::Live(live) => {
+                let state = live.state.lock().unwrap();
+                out.extend_from_slice(&state.samples[range]);
+            }
+        }
+    }
+
+    fn take_error(&self) -> Option<String> {
+        match self {
+            Samples::Complete(_) => None,
+            Samples::Live(live) => live.state.lock().unwrap().error.clone(),
+        }
+    }
+}
+
 struct Voice {
     shared: VoiceShared,
-    rate: u32,
-    total_frames: u64,
+    rate: Arc<AtomicU32>,
+    total_frames: Arc<AtomicU64>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -137,11 +246,57 @@ impl Player {
     fn spawn(&self, audio: DecodedAudio, looping: bool) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let shared = VoiceShared::new(looping);
-        let rate = audio.rate;
+        let rate = Arc::new(AtomicU32::new(audio.rate));
         let channels = audio.channels.max(1) as usize;
-        let total_frames = (audio.samples.len() / channels) as u64;
+        let total_frames = Arc::new(AtomicU64::new((audio.samples.len() / channels) as u64));
 
-        let handle = self.start_thread(audio, shared.clone());
+        let handle = self.start_thread(
+            audio.channels,
+            audio.rate,
+            Samples::Complete(audio.samples),
+            shared.clone(),
+        );
+
+        self.voices.lock().unwrap().insert(
+            id,
+            Voice {
+                shared,
+                rate,
+                total_frames,
+                handle: Some(handle),
+            },
+        );
+        id
+    }
+
+    /// Returns a voice id immediately and does everything else -
+    /// connect, probe, decode the first chunk, then open the platform sink
+    /// and play - on a background thread, so this never blocks the caller on
+    /// network I/O. Callers poll [sound_voice_state]: it reports
+    /// [STATE_CONNECTING] until the first chunk decodes (or [STATE_ERROR] if
+    /// that fails, with [sound_voice_error] carrying the reason), then
+    /// behaves like any other voice.
+    fn spawn_url(
+        &self,
+        url: String,
+        headers: Vec<(String, String)>,
+        format_hint: Option<String>,
+        looping: bool,
+    ) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let shared = VoiceShared::new(looping);
+        shared.state.store(STATE_CONNECTING, Ordering::SeqCst);
+        let rate = Arc::new(AtomicU32::new(0));
+        let total_frames = Arc::new(AtomicU64::new(0));
+
+        let handle = self.start_thread_url(
+            url,
+            headers,
+            format_hint,
+            rate.clone(),
+            total_frames.clone(),
+            shared.clone(),
+        );
 
         self.voices.lock().unwrap().insert(
             id,
@@ -156,38 +311,62 @@ impl Player {
     }
 
     #[cfg(target_os = "linux")]
-    fn start_thread(&self, audio: DecodedAudio, shared: VoiceShared) -> JoinHandle<()> {
+    fn start_thread(
+        &self,
+        channels: u32,
+        rate: u32,
+        samples: Samples,
+        shared: VoiceShared,
+    ) -> JoinHandle<()> {
         let alsa = self.alsa.clone();
         std::thread::spawn(move || {
-            let sink = alsa::PcmPlayback::open(&alsa, audio.channels, audio.rate);
-            run_voice(sink, audio, &shared);
+            let sink = alsa::PcmPlayback::open(&alsa, channels, rate);
+            run_voice(sink, channels, samples, &shared);
         })
     }
 
     #[cfg(target_os = "android")]
-    fn start_thread(&self, audio: DecodedAudio, shared: VoiceShared) -> JoinHandle<()> {
+    fn start_thread(
+        &self,
+        channels: u32,
+        rate: u32,
+        samples: Samples,
+        shared: VoiceShared,
+    ) -> JoinHandle<()> {
         let aaudio = self.aaudio.clone();
         std::thread::spawn(move || {
-            let sink = aaudio::AaudioPlayback::open(&aaudio, audio.channels, audio.rate);
-            run_voice(sink, audio, &shared);
+            let sink = aaudio::AaudioPlayback::open(&aaudio, channels, rate);
+            run_voice(sink, channels, samples, &shared);
         })
     }
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    fn start_thread(&self, audio: DecodedAudio, shared: VoiceShared) -> JoinHandle<()> {
+    fn start_thread(
+        &self,
+        channels: u32,
+        rate: u32,
+        samples: Samples,
+        shared: VoiceShared,
+    ) -> JoinHandle<()> {
         let ca = self.coreaudio.clone();
         std::thread::spawn(move || {
-            let sink = coreaudio::CoreAudioPlayback::open(&ca, audio.channels, audio.rate);
-            run_voice(sink, audio, &shared);
+            let sink = coreaudio::CoreAudioPlayback::open(&ca, channels, rate);
+            run_voice(sink, channels, samples, &shared);
         })
     }
 
     #[cfg(target_os = "windows")]
-    fn start_thread(&self, audio: DecodedAudio, shared: VoiceShared) -> JoinHandle<()> {
+    fn start_thread(
+        &self,
+        channels: u32,
+        rate: u32,
+        samples: Samples,
+        shared: VoiceShared,
+    ) -> JoinHandle<()> {
         let wmm = self.winmm.clone();
         std::thread::spawn(move || {
-            let sink = winmm::WinMMPlayback::open(&wmm, audio.channels, audio.rate);
-            run_voice(sink, audio, &shared);
+            let sink = winmm::WinMMPlayback::open(&wmm, channels, rate);
+            run_voice(sink, channels, samples, &shared);
         })
     }
 
@@ -198,13 +377,231 @@ impl Player {
         target_os = "ios",
         target_os = "windows"
     )))]
-    fn start_thread(&self, _audio: DecodedAudio, shared: VoiceShared) -> JoinHandle<()> {
+    fn start_thread(
+        &self,
+        _channels: u32,
+        _rate: u32,
+        _samples: Samples,
+        shared: VoiceShared,
+    ) -> JoinHandle<()> {
         std::thread::spawn(move || {
             *shared.error.lock().unwrap() =
                 Some("native playback is not implemented on this platform yet".into());
             shared.state.store(STATE_ERROR, Ordering::SeqCst);
         })
     }
+
+    #[cfg(target_os = "linux")]
+    fn start_thread_url(
+        &self,
+        url: String,
+        headers: Vec<(String, String)>,
+        format_hint: Option<String>,
+        rate: Arc<AtomicU32>,
+        total_frames: Arc<AtomicU64>,
+        shared: VoiceShared,
+    ) -> JoinHandle<()> {
+        let alsa = self.alsa.clone();
+        std::thread::spawn(move || {
+            run_voice_url(
+                url,
+                headers,
+                format_hint,
+                rate,
+                total_frames,
+                &shared,
+                |c, r| alsa::PcmPlayback::open(&alsa, c, r),
+            );
+        })
+    }
+
+    #[cfg(target_os = "android")]
+    fn start_thread_url(
+        &self,
+        url: String,
+        headers: Vec<(String, String)>,
+        format_hint: Option<String>,
+        rate: Arc<AtomicU32>,
+        total_frames: Arc<AtomicU64>,
+        shared: VoiceShared,
+    ) -> JoinHandle<()> {
+        let aaudio = self.aaudio.clone();
+        std::thread::spawn(move || {
+            run_voice_url(
+                url,
+                headers,
+                format_hint,
+                rate,
+                total_frames,
+                &shared,
+                |c, r| aaudio::AaudioPlayback::open(&aaudio, c, r),
+            );
+        })
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn start_thread_url(
+        &self,
+        url: String,
+        headers: Vec<(String, String)>,
+        format_hint: Option<String>,
+        rate: Arc<AtomicU32>,
+        total_frames: Arc<AtomicU64>,
+        shared: VoiceShared,
+    ) -> JoinHandle<()> {
+        let ca = self.coreaudio.clone();
+        std::thread::spawn(move || {
+            run_voice_url(
+                url,
+                headers,
+                format_hint,
+                rate,
+                total_frames,
+                &shared,
+                |c, r| coreaudio::CoreAudioPlayback::open(&ca, c, r),
+            );
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn start_thread_url(
+        &self,
+        url: String,
+        headers: Vec<(String, String)>,
+        format_hint: Option<String>,
+        rate: Arc<AtomicU32>,
+        total_frames: Arc<AtomicU64>,
+        shared: VoiceShared,
+    ) -> JoinHandle<()> {
+        let wmm = self.winmm.clone();
+        std::thread::spawn(move || {
+            run_voice_url(
+                url,
+                headers,
+                format_hint,
+                rate,
+                total_frames,
+                &shared,
+                |c, r| winmm::WinMMPlayback::open(&wmm, c, r),
+            );
+        })
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows"
+    )))]
+    fn start_thread_url(
+        &self,
+        _url: String,
+        _headers: Vec<(String, String)>,
+        _format_hint: Option<String>,
+        _rate: Arc<AtomicU32>,
+        _total_frames: Arc<AtomicU64>,
+        shared: VoiceShared,
+    ) -> JoinHandle<()> {
+        std::thread::spawn(move || {
+            *shared.error.lock().unwrap() =
+                Some("native playback is not implemented on this platform yet".into());
+            shared.state.store(STATE_ERROR, Ordering::SeqCst);
+        })
+    }
+}
+
+/// Connects, probes, and decodes the first chunk of `url` entirely on the
+/// caller's (background) thread, then opens the platform sink via `open_sink`
+/// once the format is known and runs the normal chunked playback loop. Used
+/// by every platform's `start_thread_url` so the connect/probe/decode steps
+/// aren't duplicated five times; only sink construction differs per OS.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows"
+))]
+fn run_voice_url<S: PcmSink>(
+    url: String,
+    headers: Vec<(String, String)>,
+    format_hint: Option<String>,
+    rate: Arc<AtomicU32>,
+    total_frames: Arc<AtomicU64>,
+    sh: &VoiceShared,
+    open_sink: impl FnOnce(u32, u32) -> Result<S, String>,
+) {
+    let mut decoder = match decode::open_url_decoder(url, headers, format_hint.as_deref()) {
+        Ok(d) => d,
+        Err(e) => {
+            *sh.error.lock().unwrap() = Some(e);
+            sh.state.store(STATE_ERROR, Ordering::SeqCst);
+            return;
+        }
+    };
+    let first_chunk = match decoder.next_chunk() {
+        Ok(Some(chunk)) => chunk,
+        Ok(None) => {
+            *sh.error.lock().unwrap() = Some("stream ended before any audio decoded".to_string());
+            sh.state.store(STATE_ERROR, Ordering::SeqCst);
+            return;
+        }
+        Err(e) => {
+            *sh.error.lock().unwrap() = Some(e);
+            sh.state.store(STATE_ERROR, Ordering::SeqCst);
+            return;
+        }
+    };
+    if decoder.channels == 0 || decoder.rate == 0 {
+        *sh.error.lock().unwrap() = Some("decoded zero audio frames".to_string());
+        sh.state.store(STATE_ERROR, Ordering::SeqCst);
+        return;
+    }
+
+    let channels = decoder.channels;
+    let decoder_rate = decoder.rate;
+    rate.store(decoder_rate, Ordering::SeqCst);
+    let live = LiveBuffer::new();
+    live.push(&first_chunk);
+    total_frames.store(
+        (first_chunk.len() / channels.max(1) as usize) as u64,
+        Ordering::SeqCst,
+    );
+    spawn_decode_feeder(decoder, live.clone(), channels, total_frames);
+
+    let sink = open_sink(channels, decoder_rate);
+    run_voice(sink, channels, Samples::Live(live), sh);
+}
+
+/// Decodes the rest of `decoder`'s stream on a background thread, pushing
+/// each chunk into `live` and growing `total_frames` as frames become known.
+/// Runs independently of the playback thread, which only ever reads `live`.
+fn spawn_decode_feeder(
+    mut decoder: StreamDecoder,
+    live: Arc<LiveBuffer>,
+    channels: u32,
+    total_frames: Arc<AtomicU64>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let channels = channels.max(1) as u64;
+        loop {
+            match decoder.next_chunk() {
+                Ok(Some(chunk)) => {
+                    live.push(&chunk);
+                    total_frames.fetch_add(chunk.len() as u64 / channels, Ordering::SeqCst);
+                }
+                Ok(None) => {
+                    live.finish(None);
+                    return;
+                }
+                Err(e) => {
+                    live.finish(Some(e));
+                    return;
+                }
+            }
+        }
+    })
 }
 
 /// Opens the result of a platform sink and, on success, runs the playback loop.
@@ -215,7 +612,12 @@ impl Player {
     target_os = "ios",
     target_os = "windows"
 ))]
-fn run_voice<S: PcmSink>(sink: Result<S, String>, audio: DecodedAudio, sh: &VoiceShared) {
+fn run_voice<S: PcmSink>(
+    sink: Result<S, String>,
+    channels: u32,
+    samples: Samples,
+    sh: &VoiceShared,
+) {
     let sink = match sink {
         Ok(s) => s,
         Err(e) => {
@@ -224,7 +626,7 @@ fn run_voice<S: PcmSink>(sink: Result<S, String>, audio: DecodedAudio, sh: &Voic
             return;
         }
     };
-    play_pcm(&sink, audio, sh);
+    play_pcm(&sink, channels, samples, sh);
 }
 
 /// Platform-independent playback loop: chunks the samples, applies gain, honors
@@ -236,11 +638,12 @@ fn run_voice<S: PcmSink>(sink: Result<S, String>, audio: DecodedAudio, sh: &Voic
     target_os = "ios",
     target_os = "windows"
 ))]
-fn play_pcm<S: PcmSink>(pcm: &S, audio: DecodedAudio, sh: &VoiceShared) {
-    let channels = audio.channels.max(1) as usize;
+fn play_pcm<S: PcmSink>(pcm: &S, channels: u32, samples: Samples, sh: &VoiceShared) {
+    let channels = channels.max(1) as usize;
     // ~2048 frames per write keeps stop latency under ~50 ms at 44.1 kHz.
     let chunk = channels * 2048;
     let mut scaled: Vec<i16> = Vec::new();
+    let mut slice: Vec<i16> = Vec::new();
     let mut i = 0usize;
     loop {
         if sh.stop.load(Ordering::SeqCst) {
@@ -248,12 +651,15 @@ fn play_pcm<S: PcmSink>(pcm: &S, audio: DecodedAudio, sh: &VoiceShared) {
             return;
         }
 
-        // Honor a pending seek (frame index -> sample index).
+        // Honor a pending seek (frame index -> sample index). For a still-
+        // streaming `Samples::Live`, this blocks until either that many
+        // samples have decoded or decoding finishes (e.g. a seek past a
+        // short track's end).
         let seek = sh.seek_request.swap(NO_SEEK, Ordering::SeqCst);
         if seek >= 0 {
-            i = (seek as usize)
-                .saturating_mul(channels)
-                .min(audio.samples.len());
+            let target = (seek as usize).saturating_mul(channels);
+            let (available, _) = samples.wait_len(target);
+            i = target.min(available);
             sh.position.store((i / channels) as u64, Ordering::SeqCst);
         }
 
@@ -265,22 +671,37 @@ fn play_pcm<S: PcmSink>(pcm: &S, audio: DecodedAudio, sh: &VoiceShared) {
             continue;
         }
 
-        if i >= audio.samples.len() {
+        // Blocks (for `Samples::Live`) until either one more sample exists
+        // or decoding has finished with nothing more to give.
+        let (available, is_final) = samples.wait_len(i + 1);
+
+        if let Some(e) = samples.take_error() {
+            *sh.error.lock().unwrap() = Some(e);
+            sh.state.store(STATE_ERROR, Ordering::SeqCst);
+            return;
+        }
+
+        if i >= available {
             if sh.looping.load(Ordering::SeqCst) {
                 i = 0;
                 sh.position.store(0, Ordering::SeqCst);
                 continue;
             }
+            // `is_final` is guaranteed here: `wait_len` only returns with
+            // `available <= i` once decoding has finished (otherwise it
+            // blocks for more data).
+            debug_assert!(is_final);
             break;
         }
 
         sh.state.store(STATE_PLAYING, Ordering::SeqCst);
-        let end = (i + chunk).min(audio.samples.len());
-        let slice = &audio.samples[i..end];
+        let end = (i + chunk).min(available);
+        slice.clear();
+        samples.copy_range(i..end, &mut slice);
         // Apply linear gain unless it is effectively unity.
         let gain = f32::from_bits(sh.volume.load(Ordering::Relaxed));
         let to_write: &[i16] = if (gain - 1.0).abs() < 1e-4 {
-            slice
+            &slice
         } else {
             scaled.clear();
             scaled.extend(
@@ -420,6 +841,102 @@ pub unsafe extern "C" fn sound_play_file(
     }
 }
 
+/// Streams and plays the audio at `url` (`http://`/`https://`), sending
+/// `header_count` header name/value pairs (e.g. an `Authorization: Bearer
+/// ...` token) with the request. Playback starts once enough of the
+/// response has downloaded to know the stream's format, without waiting for
+/// the whole file — see the `net`/`streaming_source`/`decode` modules.
+///
+/// Always returns a nonzero voice id without blocking on any network I/O:
+/// connecting, probing the format, and decoding the first chunk all happen
+/// on the voice's own background thread after this returns, exactly like
+/// the rest of playback. Poll [sound_voice_state]: it reports
+/// [STATE_CONNECTING] until the first chunk decodes, then behaves like any
+/// other voice; a connect/format failure surfaces as [STATE_ERROR] with the
+/// reason in [sound_voice_error], the same as a failure partway through an
+/// already-playing stream.
+///
+/// # Safety
+/// `url` must be a valid NUL-terminated UTF-8 C string. `header_names` and
+/// `header_values` must each point to `header_count` valid NUL-terminated C
+/// strings (parallel arrays: `header_names[i]`/`header_values[i]` is one
+/// header). `format` is an optional NUL-terminated extension hint (e.g.
+/// "mp3"); pass null to auto-detect from the URL's path or the response.
+/// `looping` is nonzero to repeat from the start at end of audio.
+#[no_mangle]
+pub unsafe extern "C" fn sound_play_url(
+    player: *mut Player,
+    url: *const c_char,
+    header_names: *const *const c_char,
+    header_values: *const *const c_char,
+    header_count: usize,
+    format: *const c_char,
+    looping: c_int,
+) -> u64 {
+    let Some(player) = with_player(player) else {
+        return 0;
+    };
+    if url.is_null() {
+        set_last_error("null url");
+        return 0;
+    }
+    let url = match CStr::from_ptr(url).to_str() {
+        Ok(u) => u.to_string(),
+        Err(_) => {
+            set_last_error("url is not valid UTF-8");
+            return 0;
+        }
+    };
+    let headers = match read_headers(header_names, header_values, header_count) {
+        Ok(h) => h,
+        Err(e) => {
+            set_last_error(e);
+            return 0;
+        }
+    };
+    let format_hint = if format.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(format).to_str() {
+            Ok(f) => Some(f.to_string()),
+            Err(_) => {
+                set_last_error("format hint is not valid UTF-8");
+                return 0;
+            }
+        }
+    };
+    player.spawn_url(url, headers, format_hint, looping != 0)
+}
+
+/// Reads `count` parallel NUL-terminated C string pairs from `names`/`values`
+/// into owned `(String, String)`s.
+///
+/// # Safety
+/// See [sound_play_url]'s safety section for the pointer contract.
+unsafe fn read_headers(
+    names: *const *const c_char,
+    values: *const *const c_char,
+    count: usize,
+) -> Result<Vec<(String, String)>, String> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if names.is_null() || values.is_null() {
+        return Err("null header arrays with nonzero header_count".to_string());
+    }
+    let mut headers = Vec::with_capacity(count);
+    for i in 0..count {
+        let name = CStr::from_ptr(*names.add(i))
+            .to_str()
+            .map_err(|_| format!("header name {i} is not valid UTF-8"))?;
+        let value = CStr::from_ptr(*values.add(i))
+            .to_str()
+            .map_err(|_| format!("header value {i} is not valid UTF-8"))?;
+        headers.push((name.to_string(), value.to_string()));
+    }
+    Ok(headers)
+}
+
 /// Returns the voice state (0 playing, 1 completed, 2 stopped, 3 error), or -1
 /// if the id is unknown.
 #[no_mangle]
@@ -514,6 +1031,12 @@ pub extern "C" fn sound_position(player: *mut Player, id: u64) -> i64 {
 }
 
 /// Returns a voice's total length in frames, or -1 if the id is unknown.
+///
+/// For a voice started with [sound_play_url], this is the number of frames
+/// *decoded so far*, not the true total, until the stream finishes
+/// downloading — callers polling this during URL playback should expect it
+/// to grow, the same way a browser's progress bar grows for a streamed
+/// media element before its duration is fully known.
 #[no_mangle]
 pub extern "C" fn sound_duration_frames(player: *mut Player, id: u64) -> i64 {
     let Some(player) = with_player(player) else {
@@ -521,7 +1044,7 @@ pub extern "C" fn sound_duration_frames(player: *mut Player, id: u64) -> i64 {
     };
     let voices = player.voices.lock().unwrap();
     match voices.get(&id) {
-        Some(v) => v.total_frames as i64,
+        Some(v) => v.total_frames.load(Ordering::SeqCst) as i64,
         None => -1,
     }
 }
@@ -534,7 +1057,7 @@ pub extern "C" fn sound_sample_rate(player: *mut Player, id: u64) -> c_int {
     };
     let voices = player.voices.lock().unwrap();
     match voices.get(&id) {
-        Some(v) => v.rate as c_int,
+        Some(v) => v.rate.load(Ordering::SeqCst) as c_int,
         None => -1,
     }
 }

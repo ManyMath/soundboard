@@ -85,8 +85,7 @@ type FnNewOutput = unsafe extern "C" fn(
     u32,
     *mut AudioQueueRef,
 ) -> c_int;
-type FnSetProperty =
-    unsafe extern "C" fn(AudioQueueRef, u32, *const c_void, u32) -> c_int;
+type FnSetProperty = unsafe extern "C" fn(AudioQueueRef, u32, *const c_void, u32) -> c_int;
 type FnAlloc = unsafe extern "C" fn(AudioQueueRef, u32, *mut AudioQueueBufferRef) -> c_int;
 type FnEnqueue =
     unsafe extern "C" fn(AudioQueueRef, AudioQueueBufferRef, u32, *const c_void) -> c_int;
@@ -114,8 +113,7 @@ type FnGetData = unsafe extern "C" fn(
 type FnCFStringCreate =
     unsafe extern "C" fn(*const c_void, *const u8, isize, u32, u8, *const c_void) -> CFStringRef;
 type FnCFStringLen = unsafe extern "C" fn(CFStringRef) -> isize;
-type FnCFStringGetCString =
-    unsafe extern "C" fn(CFStringRef, *mut u8, isize, u32) -> u8;
+type FnCFStringGetCString = unsafe extern "C" fn(CFStringRef, *mut u8, isize, u32) -> u8;
 type FnCFRelease = unsafe extern "C" fn(*const c_void);
 
 const K_CF_ENCODING_UTF8: u32 = 0x0800_0100;
@@ -491,7 +489,11 @@ unsafe extern "C" fn output_cb(
         let take = chunk_frames.min(cap_frames - frames_written);
         for f in 0..take {
             let l = chunk[f * src_ch];
-            let r = if src_ch == 2 { chunk[f * src_ch + 1] } else { l };
+            let r = if src_ch == 2 {
+                chunk[f * src_ch + 1]
+            } else {
+                l
+            };
             let base = (frames_written + f) * OUT_CHANNELS as usize;
             *dst.add(base) = l as f32 / 32768.0;
             *dst.add(base + 1) = r as f32 / 32768.0;

@@ -25,6 +25,26 @@ typedef _PlayBytes =
     int Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Utf8>, int);
 typedef _PlayFileNative = Uint64 Function(Pointer<Void>, Pointer<Utf8>, Int32);
 typedef _PlayFile = int Function(Pointer<Void>, Pointer<Utf8>, int);
+typedef _PlayUrlNative =
+    Uint64 Function(
+      Pointer<Void>,
+      Pointer<Utf8>,
+      Pointer<Pointer<Utf8>>,
+      Pointer<Pointer<Utf8>>,
+      Size,
+      Pointer<Utf8>,
+      Int32,
+    );
+typedef _PlayUrl =
+    int Function(
+      Pointer<Void>,
+      Pointer<Utf8>,
+      Pointer<Pointer<Utf8>>,
+      Pointer<Pointer<Utf8>>,
+      int,
+      Pointer<Utf8>,
+      int,
+    );
 typedef _VoiceStateNative = Int32 Function(Pointer<Void>, Uint64);
 typedef _VoiceState = int Function(Pointer<Void>, int);
 typedef _VoiceOpNative = Int32 Function(Pointer<Void>, Uint64);
@@ -64,6 +84,7 @@ const int _stateCompleted = 1;
 const int _stateStopped = 2;
 const int _stateError = 3;
 const int _statePaused = 4;
+const int _stateConnecting = 5;
 
 /// Locates and opens the `sound_cli` shared library.
 class NativeLibrary {
@@ -149,6 +170,7 @@ class _Bindings {
       playFile = lib.lookupFunction<_PlayFileNative, _PlayFile>(
         'sound_play_file',
       ),
+      playUrl = lib.lookupFunction<_PlayUrlNative, _PlayUrl>('sound_play_url'),
       voiceState = lib.lookupFunction<_VoiceStateNative, _VoiceState>(
         'sound_voice_state',
       ),
@@ -204,6 +226,7 @@ class _Bindings {
   final _PlayerFree playerFree;
   final _PlayBytes playBytes;
   final _PlayFile playFile;
+  final _PlayUrl playUrl;
   final _VoiceState voiceState;
   final _VoiceOp stop;
   final _SetVolume setVolume;
@@ -328,6 +351,13 @@ class FfiBackend extends SoundBackend implements PcmTap {
         } finally {
           malloc.free(cPath);
         }
+      case UriSource():
+        // The no-device decode-to-PCM tap (used by `soundboard`'s mic
+        // mixing) has no native `sound_decode_url` counterpart yet -
+        // `sound_play_url` only supports the audio-device playback path.
+        throw const UnsupportedSourceException(
+          'UriSource is not supported by openPcmStream yet; use load()/play() instead',
+        );
     }
     if (decoded == nullptr) {
       throw UnsupportedSourceException('decode failed: ${_lastError()}');
@@ -410,7 +440,10 @@ class FfiPlayback implements Playback {
     if (_volume != 1.0) _b.setVolume(_player, _voiceId, _volume);
     _rate = _b.sampleRate(_player, _voiceId);
     _durationFrames = _b.durationFrames(_player, _voiceId);
-    _state = PlaybackState.playing;
+    // For a UriSource, the native voice starts in a connecting state (rate/
+    // duration both 0) until its background thread's first chunk decodes;
+    // _checkState's next poll picks up the real state once it does.
+    _state = _rate > 0 ? PlaybackState.playing : PlaybackState.connecting;
     _poll = Timer.periodic(
       const Duration(milliseconds: 50),
       (_) => _checkState(),
@@ -439,13 +472,62 @@ class FfiPlayback implements Playback {
         } finally {
           malloc.free(cPath);
         }
+      case UriSource(:final uri, :final headers, :final format):
+        final cUrl = uri.toString().toNativeUtf8();
+        final cFormat = format == null ? nullptr : format.toNativeUtf8();
+        final entries = headers.entries.toList(growable: false);
+        final names = malloc<Pointer<Utf8>>(entries.length);
+        final values = malloc<Pointer<Utf8>>(entries.length);
+        final allocatedStrings = <Pointer<Utf8>>[];
+        try {
+          for (var i = 0; i < entries.length; i++) {
+            final name = entries[i].key.toNativeUtf8();
+            final value = entries[i].value.toNativeUtf8();
+            allocatedStrings
+              ..add(name)
+              ..add(value);
+            names[i] = name;
+            values[i] = value;
+          }
+          // The native side either fails synchronously (bad URL/unsupported
+          // format) or spawns background fetch/decode threads before
+          // returning, so the request buffers are safe to free immediately
+          // afterward either way.
+          return _b.playUrl(
+            _player,
+            cUrl,
+            names,
+            values,
+            entries.length,
+            cFormat,
+            loopFlag,
+          );
+        } finally {
+          malloc.free(cUrl);
+          if (cFormat != nullptr) malloc.free(cFormat);
+          for (final s in allocatedStrings) {
+            malloc.free(s);
+          }
+          malloc.free(names);
+          malloc.free(values);
+        }
     }
   }
 
   void _checkState() {
     if (_voiceId == 0) return;
+    // For `UriSource`, the rate is 0 (and duration/position meaningless)
+    // until the background thread's first chunk decodes, and frames decoded
+    // so far (hence duration) keep growing after that while the stream
+    // downloads - so both are re-read every poll rather than once in
+    // `play()`. A no-op re-read for the bytes/file sources, whose rate and
+    // total are already known up front.
+    _rate = _b.sampleRate(_player, _voiceId);
+    _durationFrames = _b.durationFrames(_player, _voiceId);
     final native = _b.voiceState(_player, _voiceId);
     switch (native) {
+      case _stateConnecting:
+        _state = PlaybackState.connecting;
       case _statePlaying:
         _state = PlaybackState.playing;
       case _statePaused:

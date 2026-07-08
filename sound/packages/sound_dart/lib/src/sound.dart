@@ -1,7 +1,5 @@
 import 'dart:typed_data';
 
-import 'package:http/http.dart' as http;
-
 import 'backends/native/native_backend.dart';
 import 'backends/silent_backend.dart';
 import 'exceptions.dart';
@@ -142,44 +140,45 @@ class Sound {
     loop: loop,
   );
 
-  /// Fetches [url] over HTTP and loads it (without starting). Works on every
-  /// platform, including the web (where [FileSource] does not).
+  /// Loads [url] as a [SoundSource.uri] (without starting), sending [headers]
+  /// with the request (e.g. an `Authorization` bearer token). Works on every
+  /// platform, including the web (where [FileSource] does not). On a native
+  /// backend that supports it, playback can start before [url] finishes
+  /// downloading; see [SoundSource.uri].
   static Future<Playback> loadUrl(
     String url, {
+    Map<String, String> headers = const {},
     double volume = 1.0,
     bool loop = false,
   }) async {
-    final bytes = await _fetch(url);
-    return load(
-      SoundSource.bytes(bytes, format: _extensionOf(url)),
-      volume: volume,
-      loop: loop,
-    );
-  }
-
-  /// Fetches [url] over HTTP and starts playing it.
-  static Future<Playback> playUrl(
-    String url, {
-    double volume = 1.0,
-    bool loop = false,
-  }) async {
-    final playback = await loadUrl(url, volume: volume, loop: loop);
-    await playback.play();
-    return playback;
-  }
-
-  static Future<Uint8List> _fetch(String url) async {
     final Uri uri;
     try {
       uri = Uri.parse(url);
     } on FormatException catch (e) {
       throw SoundException('invalid URL "$url": ${e.message}');
     }
-    final response = await http.get(uri);
-    if (response.statusCode != 200) {
-      throw SoundException('failed to fetch $url: HTTP ${response.statusCode}');
-    }
-    return response.bodyBytes;
+    return load(
+      SoundSource.uri(uri, headers: headers, format: _extensionOf(url)),
+      volume: volume,
+      loop: loop,
+    );
+  }
+
+  /// Loads [url] (with [headers]) and starts playing it.
+  static Future<Playback> playUrl(
+    String url, {
+    Map<String, String> headers = const {},
+    double volume = 1.0,
+    bool loop = false,
+  }) async {
+    final playback = await loadUrl(
+      url,
+      headers: headers,
+      volume: volume,
+      loop: loop,
+    );
+    await playback.play();
+    return playback;
   }
 
   /// The lowercase file extension of a URL/path, or `null` if there is none.
