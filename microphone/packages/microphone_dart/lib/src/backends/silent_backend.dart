@@ -50,8 +50,9 @@ class SilentBackend extends CaptureBackend {
   Future<Recording> startRecording({
     CaptureFormat format = const CaptureFormat(),
     String? deviceId,
+    bool retainPcm = true,
   }) async {
-    final recording = SilentRecording(format, chunk);
+    final recording = SilentRecording(format, chunk, retainPcm: retainPcm);
     started.add(recording);
     recording._start();
     return recording;
@@ -63,11 +64,14 @@ class SilentBackend extends CaptureBackend {
 
 /// The [Recording] returned by [SilentBackend]: a timer that emits zeroed PCM.
 class SilentRecording implements Recording {
-  SilentRecording(this._format, this._chunk);
+  SilentRecording(this._format, this._chunk, {bool retainPcm = true})
+    : _retainPcm = retainPcm;
 
   final CaptureFormat _format;
   final Duration _chunk;
+  final bool _retainPcm;
   final BytesBuilder _pcm = BytesBuilder(copy: false);
+  int _pcmBytes = 0;
   final StreamController<Uint8List> _frames =
       StreamController<Uint8List>.broadcast();
 
@@ -91,7 +95,7 @@ class SilentRecording implements Recording {
 
   @override
   Duration get duration {
-    final frames = _pcm.length ~/ _format.bytesPerFrame;
+    final frames = _pcmBytes ~/ _format.bytesPerFrame;
     return Duration(
       microseconds:
           frames * Duration.microsecondsPerSecond ~/ _format.sampleRate,
@@ -112,7 +116,8 @@ class SilentRecording implements Recording {
     // Round down to a whole frame so the PCM is always frame-aligned.
     final aligned = (bytes ~/ _format.bytesPerFrame) * _format.bytesPerFrame;
     final silence = Uint8List(aligned);
-    _pcm.add(silence);
+    _pcmBytes += silence.length;
+    if (_retainPcm) _pcm.add(silence);
     if (!_frames.isClosed) _frames.add(silence);
   }
 

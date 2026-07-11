@@ -54,7 +54,18 @@ abstract class CaptureBackend {
   /// [deviceId] selects an input from [devices]; when null the system default
   /// is used. Throws [PermissionDeniedException] if access is refused and
   /// [CaptureException] on a capture failure.
-  Future<Recording> startRecording({CaptureFormat format, String? deviceId});
+  ///
+  /// [retainPcm] controls whether the recording accumulates everything it
+  /// captures for [Recording.pcm]/[Recording.stop]. That is the right default
+  /// for a bounded recording, but an open-ended live stream (feeding a call, a
+  /// virtual microphone) grows without limit -- pass false there; the
+  /// recording then only publishes [Recording.frames] (and [Recording.stop]
+  /// returns an empty WAV). [Recording.duration] keeps counting either way.
+  Future<Recording> startRecording({
+    CaptureFormat format,
+    String? deviceId,
+    bool retainPcm,
+  });
 
   /// Releases any global resources held by the backend.
   Future<void> dispose();

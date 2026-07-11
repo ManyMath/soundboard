@@ -169,6 +169,31 @@ void main() {
       await board.dispose();
     });
 
+    test('retainPcm: false streams frames without accumulating pcm', () async {
+      final board = Soundboard(
+        format: _fmt,
+        chunk: const Duration(milliseconds: 20),
+      );
+      final micCtrl = StreamController<Uint8List>();
+      final mic = StreamCaptureBackend(source: micCtrl.stream, format: _fmt);
+      final rec = await board
+          .asMicrophoneBackend(physicalMic: mic)
+          .startRecording(format: _fmt, retainPcm: false);
+
+      final received = <int>[];
+      final sub = rec.frames.listen((c) => received.addAll(samples16(c)));
+      micCtrl.add(pcm16(List.filled(160, 700)));
+      await pump();
+
+      expect(received, List.filled(160, 700)); // the live stream still flows
+      expect(rec.pcm, isEmpty); // nothing accumulated
+      expect(rec.duration, const Duration(milliseconds: 20)); // still counted
+      await sub.cancel();
+      await rec.stop();
+      await micCtrl.close();
+      await board.dispose();
+    });
+
     test('works when registered through the Microphone registry', () async {
       final board = Soundboard(
         format: _fmt,

@@ -34,6 +34,7 @@ class MixingCaptureBackend extends CaptureBackend {
     this.name = 'mixing',
     this.priority = 60,
     int primary = 0,
+    this.ownsSources = true,
   }) : assert(sources.isNotEmpty, 'at least one source is required'),
        assert(
          primary >= 0 && primary < sources.length,
@@ -44,6 +45,11 @@ class MixingCaptureBackend extends CaptureBackend {
 
   final List<CaptureBackend> _sources;
   final int _primary;
+
+  /// Whether [dispose] disposes the sources too. Pass false when the sources
+  /// are shared (e.g. the globally registered hardware backend) and owned by
+  /// someone else.
+  final bool ownsSources;
 
   /// The format the mixed output is produced in. All sources must match it.
   final CaptureFormat format;
@@ -93,17 +99,34 @@ class MixingCaptureBackend extends CaptureBackend {
   Future<Recording> startRecording({
     CaptureFormat format = const CaptureFormat(),
     String? deviceId,
+    bool retainPcm = true,
   }) async {
     final children = <Recording>[];
-    for (final s in _sources) {
+    for (var i = 0; i < _sources.length; i++) {
+      final s = _sources[i];
       await s.initialize();
-      children.add(await s.startRecording(format: this.format));
+      // The children only feed the mix through their frames; their own
+      // accumulated PCM is never read, so never retain it. [deviceId] selects
+      // the input of the primary (the microphone), where it is meaningful.
+      children.add(
+        await s.startRecording(
+          format: this.format,
+          deviceId: i == _primary ? deviceId : null,
+          retainPcm: false,
+        ),
+      );
     }
-    return MixingRecording(children, this.format, _primary);
+    return MixingRecording(
+      children,
+      this.format,
+      _primary,
+      retainPcm: retainPcm,
+    );
   }
 
   @override
   Future<void> dispose() async {
+    if (!ownsSources) return;
     for (final s in _sources) {
       await s.dispose();
     }
@@ -112,7 +135,12 @@ class MixingCaptureBackend extends CaptureBackend {
 
 /// The [Recording] returned by [MixingCaptureBackend].
 class MixingRecording implements Recording {
-  MixingRecording(this._children, this._format, this._primary) {
+  MixingRecording(
+    this._children,
+    this._format,
+    this._primary, {
+    bool retainPcm = true,
+  }) : _retainPcm = retainPcm {
     _state = RecordingState.recording;
     for (var i = 0; i < _children.length; i++) {
       _buffers.add(BytesBuilder(copy: false));
@@ -132,10 +160,12 @@ class MixingRecording implements Recording {
   final List<Recording> _children;
   final CaptureFormat _format;
   final int _primary;
+  final bool _retainPcm;
 
   final List<BytesBuilder> _buffers = [];
   final List<StreamSubscription<Uint8List>> _subs = [];
   final BytesBuilder _pcm = BytesBuilder(copy: false);
+  int _pcmBytes = 0;
   final StreamController<Uint8List> _frames =
       StreamController<Uint8List>.broadcast();
 
@@ -159,7 +189,7 @@ class MixingRecording implements Recording {
 
   @override
   Duration get duration {
-    final frameCount = _pcm.length ~/ _format.bytesPerFrame;
+    final frameCount = _pcmBytes ~/ _format.bytesPerFrame;
     return Duration(
       microseconds:
           frameCount * Duration.microsecondsPerSecond ~/ _format.sampleRate,
@@ -198,7 +228,8 @@ class MixingRecording implements Recording {
       }
       view.setInt16(i << 1, v, Endian.little);
     }
-    _pcm.add(out);
+    _pcmBytes += out.length;
+    if (_retainPcm) _pcm.add(out);
     if (!_frames.isClosed) _frames.add(out);
   }
 

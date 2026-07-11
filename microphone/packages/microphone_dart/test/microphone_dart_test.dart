@@ -35,6 +35,7 @@ class _ProbeBackend extends CaptureBackend {
   Future<Recording> startRecording({
     CaptureFormat format = const CaptureFormat(),
     String? deviceId,
+    bool retainPcm = true,
   }) async => SilentRecording(format, const Duration(milliseconds: 10));
 
   @override

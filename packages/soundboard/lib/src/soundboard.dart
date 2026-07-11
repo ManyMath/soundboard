@@ -84,9 +84,16 @@ class Soundboard {
   /// `Microphone.registerBackend`) in place of the default hardware backend.
   /// [physicalMic] is the microphone source; when null the platform's currently
   /// selected `Microphone.backend` is used (the real microphone on native, the
-  /// silent fallback in headless environments). The microphone is the primary
-  /// timeline -- it runs continuously and clips are mixed in as they play --
-  /// with [micVolume] applied to it and [masterVolume] to the clip bus.
+  /// silent fallback in headless environments). Resolve it before registering
+  /// the returned backend as active, or the board would feed itself. The
+  /// microphone is the primary timeline -- it runs continuously and clips are
+  /// mixed in as they play -- with [micVolume] applied to it and [masterVolume]
+  /// to the clip bus.
+  ///
+  /// For an open-ended live session (feeding a call or a virtual microphone),
+  /// start the recording with `retainPcm: false` so the session's audio is not
+  /// accumulated in memory. Disposing the returned backend does not dispose
+  /// [physicalMic] (or the global backend); their owners do.
   CaptureBackend asMicrophoneBackend({CaptureBackend? physicalMic}) {
     final mic = _GainCaptureBackend(
       physicalMic ?? Microphone.backend,
@@ -94,7 +101,12 @@ class Soundboard {
       format,
     );
     final clips = StreamCaptureBackend(source: _clipBus.frames, format: format);
-    return MixingCaptureBackend([mic, clips], format: format, primary: 0);
+    return MixingCaptureBackend(
+      [mic, clips],
+      format: format,
+      primary: 0,
+      ownsSources: false,
+    );
   }
 
   /// Releases the soundboard's mixing resources.
@@ -136,10 +148,12 @@ class _GainCaptureBackend extends CaptureBackend {
   Future<Recording> startRecording({
     CaptureFormat format = const CaptureFormat(),
     String? deviceId,
+    bool retainPcm = true,
   }) async {
     final inner = await _inner.startRecording(
       format: _format,
       deviceId: deviceId,
+      retainPcm: retainPcm,
     );
     return _GainRecording(inner, _gain);
   }

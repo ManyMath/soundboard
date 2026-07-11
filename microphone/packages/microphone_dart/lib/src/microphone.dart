@@ -118,17 +118,25 @@ class Microphone {
   /// [format] requests a sample rate / channel count / encoding; the device may
   /// force its own, so consult [Recording.format] for what is actually in
   /// effect. [deviceId] selects an input from [devices] (null = system
-  /// default). Throws [PermissionDeniedException] if access is refused.
+  /// default). [retainPcm] is as on [CaptureBackend.startRecording]: pass
+  /// false for an open-ended live stream so the recording does not accumulate
+  /// PCM without bound. Throws [PermissionDeniedException] if access is
+  /// refused.
   static Future<Recording> record({
     CaptureFormat format = const CaptureFormat(),
     String? deviceId,
+    bool retainPcm = true,
   }) async {
     final b = backend;
     if (!_initialized.contains(b)) {
       await b.initialize();
       _initialized.add(b);
     }
-    return b.startRecording(format: format, deviceId: deviceId);
+    return b.startRecording(
+      format: format,
+      deviceId: deviceId,
+      retainPcm: retainPcm,
+    );
   }
 
   /// Disposes the active backend and clears selection/registry.

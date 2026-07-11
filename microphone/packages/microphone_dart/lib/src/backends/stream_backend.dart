@@ -61,7 +61,8 @@ class StreamCaptureBackend extends CaptureBackend {
   Future<Recording> startRecording({
     CaptureFormat format = const CaptureFormat(),
     String? deviceId,
-  }) async => StreamRecording(_source, this.format);
+    bool retainPcm = true,
+  }) async => StreamRecording(_source, this.format, retainPcm: retainPcm);
 
   @override
   Future<void> dispose() async {}
@@ -73,13 +74,19 @@ class StreamCaptureBackend extends CaptureBackend {
 /// while accumulating it for [stop]. Audio arriving while paused is dropped, so
 /// the paused interval leaves no gap.
 class StreamRecording implements Recording {
-  StreamRecording(Stream<Uint8List> source, this._format) {
+  StreamRecording(
+    Stream<Uint8List> source,
+    this._format, {
+    bool retainPcm = true,
+  }) : _retainPcm = retainPcm {
     _state = RecordingState.recording;
     _sub = source.listen(_onData, onError: _onError, onDone: _onDone);
   }
 
   final CaptureFormat _format;
+  final bool _retainPcm;
   final BytesBuilder _pcm = BytesBuilder(copy: false);
+  int _pcmBytes = 0;
   final StreamController<Uint8List> _frames =
       StreamController<Uint8List>.broadcast();
 
@@ -104,7 +111,7 @@ class StreamRecording implements Recording {
 
   @override
   Duration get duration {
-    final frameCount = _pcm.length ~/ _format.bytesPerFrame;
+    final frameCount = _pcmBytes ~/ _format.bytesPerFrame;
     return Duration(
       microseconds:
           frameCount * Duration.microsecondsPerSecond ~/ _format.sampleRate,
@@ -113,7 +120,8 @@ class StreamRecording implements Recording {
 
   void _onData(Uint8List chunk) {
     if (_state != RecordingState.recording) return; // dropped while paused
-    _pcm.add(chunk);
+    _pcmBytes += chunk.length;
+    if (_retainPcm) _pcm.add(chunk);
     if (!_frames.isClosed) _frames.add(chunk);
   }
 

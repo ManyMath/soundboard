@@ -260,9 +260,10 @@ class FfiBackend extends CaptureBackend {
   Future<Recording> startRecording({
     CaptureFormat format = const CaptureFormat(),
     String? deviceId,
+    bool retainPcm = true,
   }) async {
     if (_recorder == nullptr) await initialize();
-    return FfiRecording._(this, format, deviceId);
+    return FfiRecording._(this, format, deviceId, retainPcm: retainPcm);
   }
 
   @override
@@ -277,7 +278,12 @@ class FfiBackend extends CaptureBackend {
 /// A single FFI-backed recording. Polls `microphone_read` to drain captured PCM
 /// into the [frames] stream and an accumulating buffer.
 class FfiRecording implements Recording {
-  FfiRecording._(this._backend, CaptureFormat requested, String? deviceId) {
+  FfiRecording._(
+    this._backend,
+    CaptureFormat requested,
+    String? deviceId, {
+    bool retainPcm = true,
+  }) : _retainPcm = retainPcm {
     final cId = deviceId == null ? nullptr : deviceId.toNativeUtf8();
     try {
       _id = _b.start(_recorder, requested.sampleRate, requested.channels, cId);
@@ -304,7 +310,9 @@ class FfiRecording implements Recording {
 
   final FfiBackend _backend;
   late final CaptureFormat _format;
+  final bool _retainPcm;
   final BytesBuilder _pcm = BytesBuilder(copy: false);
+  int _pcmBytes = 0;
   final StreamController<Uint8List> _frames =
       StreamController<Uint8List>.broadcast();
 
@@ -334,7 +342,7 @@ class FfiRecording implements Recording {
 
   @override
   Duration get duration {
-    final frameCount = _pcm.length ~/ _format.bytesPerFrame;
+    final frameCount = _pcmBytes ~/ _format.bytesPerFrame;
     return Duration(
       microseconds:
           frameCount * Duration.microsecondsPerSecond ~/ _format.sampleRate,
@@ -364,7 +372,8 @@ class FfiRecording implements Recording {
     final view = _buf.asTypedList(n); // Int16List over native memory
     final bytes = Uint8List(n * 2)
       ..setRange(0, n * 2, view.buffer.asUint8List(view.offsetInBytes, n * 2));
-    _pcm.add(bytes);
+    _pcmBytes += bytes.length;
+    if (_retainPcm) _pcm.add(bytes);
     if (!_frames.isClosed) _frames.add(bytes);
   }
 

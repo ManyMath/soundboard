@@ -86,6 +86,7 @@ class WebCaptureBackend extends CaptureBackend {
   Future<Recording> startRecording({
     CaptureFormat format = const CaptureFormat(),
     String? deviceId,
+    bool retainPcm = true,
   }) async {
     final web.MediaStream stream;
     try {
@@ -95,7 +96,7 @@ class WebCaptureBackend extends CaptureBackend {
         'getUserMedia failed (permission denied or no microphone): $e',
       );
     }
-    return WebRecording._(stream);
+    return WebRecording._(stream, retainPcm: retainPcm);
   }
 
   @override
@@ -119,7 +120,8 @@ class WebCaptureBackend extends CaptureBackend {
 
 /// A single browser recording driven by a ScriptProcessorNode.
 class WebRecording implements Recording {
-  WebRecording._(this._stream) {
+  WebRecording._(this._stream, {bool retainPcm = true})
+    : _retainPcm = retainPcm {
     _context = web.AudioContext();
     final rate = _context.sampleRate.round();
     _format = CaptureFormat(sampleRate: rate, channels: 1);
@@ -140,7 +142,9 @@ class WebRecording implements Recording {
   late final web.ScriptProcessorNode _processor;
   late final CaptureFormat _format;
 
+  final bool _retainPcm;
   final BytesBuilder _pcm = BytesBuilder(copy: false);
+  int _pcmBytes = 0;
   final StreamController<Uint8List> _frames =
       StreamController<Uint8List>.broadcast();
   RecordingState _state = RecordingState.idle;
@@ -163,7 +167,7 @@ class WebRecording implements Recording {
 
   @override
   Duration get duration {
-    final frameCount = _pcm.length ~/ _format.bytesPerFrame;
+    final frameCount = _pcmBytes ~/ _format.bytesPerFrame;
     return Duration(
       microseconds:
           frameCount * Duration.microsecondsPerSecond ~/ _format.sampleRate,
@@ -183,7 +187,8 @@ class WebRecording implements Recording {
       if (s < -1) s = -1;
       view.setInt16(i * 2, (s * 32767).round(), Endian.little);
     }
-    _pcm.add(out);
+    _pcmBytes += out.length;
+    if (_retainPcm) _pcm.add(out);
     if (!_frames.isClosed) _frames.add(out);
   }
 
