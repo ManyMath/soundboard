@@ -90,6 +90,13 @@ void main() {
         throwsA(isA<NoBackendAvailableException>()),
       );
     });
+
+    test('a pinned backend survives a later registration', () {
+      final pinned = _ProbeBackend('pinned', priority: 1);
+      Microphone.registerBackend(pinned, makeActive: true);
+      Microphone.registerBackend(_ProbeBackend('later', priority: 9000));
+      expect(Microphone.backend.name, 'pinned');
+    });
   });
 
   group('recording lifecycle', () {
