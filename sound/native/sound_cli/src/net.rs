@@ -7,7 +7,7 @@
 //! project's "no dependency beyond Rust itself" constraint.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -109,8 +109,16 @@ impl Read for Body {
                 if *remaining == 0 || buf.is_empty() {
                     return Ok(0);
                 }
-                let cap = (*remaining as usize).min(buf.len());
+                let cap = (*remaining).min(buf.len() as u64) as usize;
                 let n = conn.read(&mut buf[..cap])?;
+                if n == 0 {
+                    // The connection closed before Content-Length bytes
+                    // arrived; that is a truncated download, not end-of-body.
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("body truncated ({remaining} bytes missing)"),
+                    ));
+                }
                 *remaining -= n as u64;
                 Ok(n)
             }
@@ -144,8 +152,14 @@ impl Read for Body {
                     }
                     *remaining = size;
                 }
-                let cap = (*remaining as usize).min(buf.len());
+                let cap = (*remaining).min(buf.len() as u64) as usize;
                 let n = conn.read(&mut buf[..cap])?;
+                if n == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "connection closed mid-chunk",
+                    ));
+                }
                 *remaining -= n as u64;
                 if *remaining == 0 {
                     // Consume the CRLF that follows every chunk's data.
@@ -158,6 +172,11 @@ impl Read for Body {
         }
     }
 }
+
+// Caps on what a server may feed us before the body starts, so a hostile or
+// broken server cannot grow memory without bound.
+const MAX_LINE_BYTES: usize = 16 * 1024;
+const MAX_HEADER_LINES: usize = 128;
 
 /// Reads one CRLF-terminated line (without the CRLF) from a buffered reader.
 fn read_line<R: BufRead>(r: &mut R) -> io::Result<String> {
@@ -180,6 +199,12 @@ fn read_line<R: BufRead>(r: &mut R) -> io::Result<String> {
             }
             break;
         }
+        if line.len() >= MAX_LINE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "header line too long",
+            ));
+        }
         line.push(byte[0]);
     }
     String::from_utf8(line).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
@@ -199,21 +224,39 @@ fn root_store() -> &'static Arc<RootCertStore> {
 /// response headers. Follows up to 5 redirects (3xx with a `Location`
 /// header).
 ///
+/// Caller headers (which typically carry credentials, e.g. `Authorization`)
+/// are only sent to the origin of the original URL: a redirect to a different
+/// scheme, host, or port drops them for that hop and every hop after it, so a
+/// bearer token can never leak to a third-party host or over a downgraded
+/// plain-HTTP connection.
+///
 /// `url` must be `http://` or `https://`. A connect/read timeout of 15s
 /// applies to each underlying socket operation.
 pub fn get(url: &str, headers: &[(String, String)]) -> Result<Response, String> {
     let mut current = url.to_string();
+    let mut send_headers = true;
     for _ in 0..5 {
-        let response = get_once(&current, headers)?;
+        let response = get_once(&current, if send_headers { headers } else { &[] })?;
         if (300..400).contains(&response.status) {
             if let Some(location) = response.header("location") {
-                current = resolve_redirect(&current, location)?;
+                let next = resolve_redirect(&current, location)?;
+                if !same_origin(&current, &next)? {
+                    send_headers = false;
+                }
+                current = next;
                 continue;
             }
         }
         return Ok(response);
     }
     Err("too many redirects".to_string())
+}
+
+/// Whether two URLs share scheme, host (case-insensitive), and port.
+fn same_origin(a: &str, b: &str) -> Result<bool, String> {
+    let pa = parse_url(a)?;
+    let pb = parse_url(b)?;
+    Ok(pa.tls == pb.tls && pa.host.eq_ignore_ascii_case(&pb.host) && pa.port == pb.port)
 }
 
 fn resolve_redirect(base: &str, location: &str) -> Result<String, String> {
@@ -253,10 +296,26 @@ fn parse_url(url: &str) -> Result<ParsedUrl, String> {
     } else {
         return Err(format!("unsupported URL scheme: {url}"));
     };
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
+    // The authority ends at the first path/query/fragment delimiter; a URL
+    // like `http://host?q=1` has an implicit "/" path.
+    let (authority, path) = match rest.find(['/', '?', '#']) {
+        Some(i) if rest.as_bytes()[i] == b'/' => (&rest[..i], rest[i..].to_string()),
+        Some(i) => (&rest[..i], format!("/{}", &rest[i..])),
+        None => (rest, "/".to_string()),
     };
+    // A fragment is client-side only; never send it.
+    let path = path.split('#').next().unwrap_or("/").to_string();
+    if path.bytes().any(|b| b.is_ascii_control() || b == b' ') {
+        return Err("control characters or spaces in URL path".to_string());
+    }
+    // Reject the authority forms this minimal client does not speak, loudly,
+    // instead of mangling them.
+    if authority.contains('@') {
+        return Err("userinfo (user@host) in URLs is not supported".to_string());
+    }
+    if authority.starts_with('[') {
+        return Err("IPv6 literal hosts are not supported".to_string());
+    }
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) => (h, p.parse::<u16>().map_err(|_| "bad port".to_string())?),
         None => (authority, if tls { 443 } else { 80 }),
@@ -268,17 +327,47 @@ fn parse_url(url: &str) -> Result<ParsedUrl, String> {
         tls,
         host: host.to_string(),
         port,
-        path: path.to_string(),
+        path,
     })
+}
+
+const IO_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn connect(host: &str, port: u16) -> Result<TcpStream, String> {
+    // connect_timeout needs resolved addresses. (DNS resolution itself has no
+    // std timeout; the OS resolver's applies.)
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("resolve {host}:{port}: {e}"))?;
+    let mut last_err = format!("no addresses for {host}:{port}");
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, IO_TIMEOUT) {
+            Ok(s) => return Ok(s),
+            Err(e) => last_err = format!("connect {addr}: {e}"),
+        }
+    }
+    Err(last_err)
 }
 
 fn get_once(url: &str, headers: &[(String, String)]) -> Result<Response, String> {
     let parsed = parse_url(url)?;
-    let tcp = TcpStream::connect((parsed.host.as_str(), parsed.port))
-        .map_err(|e| format!("connect {}:{}: {e}", parsed.host, parsed.port))?;
-    tcp.set_read_timeout(Some(Duration::from_secs(15)))
+    // Refuse header names/values that could inject request lines.
+    for (name, value) in headers {
+        let name_ok = !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if !name_ok {
+            return Err(format!("invalid header name: {name:?}"));
+        }
+        if value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+            return Err(format!("header {name} value contains control characters"));
+        }
+    }
+    let tcp = connect(parsed.host.as_str(), parsed.port)?;
+    tcp.set_read_timeout(Some(IO_TIMEOUT))
         .map_err(|e| format!("set read timeout: {e}"))?;
-    tcp.set_write_timeout(Some(Duration::from_secs(15)))
+    tcp.set_write_timeout(Some(IO_TIMEOUT))
         .map_err(|e| format!("set write timeout: {e}"))?;
 
     let mut conn = if parsed.tls {
@@ -318,6 +407,9 @@ fn get_once(url: &str, headers: &[(String, String)]) -> Result<Response, String>
         let line = read_line(&mut conn).map_err(|e| format!("read header line: {e}"))?;
         if line.is_empty() {
             break;
+        }
+        if response_headers.len() >= MAX_HEADER_LINES {
+            return Err("too many response headers".to_string());
         }
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -486,6 +578,99 @@ mod tests {
     #[test]
     fn rejects_unsupported_scheme() {
         assert!(get("ftp://example.com/x", &[]).is_err());
+    }
+
+    #[test]
+    fn errors_on_truncated_content_length_body() {
+        // The server promises 10 bytes but closes after 5; that must surface
+        // as an error, not a clean end-of-body.
+        let base = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello");
+        let mut response = get(&format!("{base}/track"), &[]).unwrap();
+        let mut body = Vec::new();
+        let err = response.read_to_end(&mut body).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn drops_caller_headers_on_cross_origin_redirect() {
+        // Target host: reports whether the request carried an Authorization
+        // header. It is on a different port than the origin, so it is a
+        // different origin and must not receive the credential.
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_addr = target.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = target.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).unwrap();
+                if n == 0 || line == "\r\n" {
+                    break;
+                }
+                request.push_str(&line);
+            }
+            let body = if request.to_ascii_lowercase().contains("authorization") {
+                b"leaked".as_slice()
+            } else {
+                b"clean".as_slice()
+            };
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
+                )
+                .unwrap();
+            stream.write_all(body).unwrap();
+        });
+        // Origin host: redirects to the target.
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = origin.accept().unwrap();
+            let mut discard = [0u8; 4096];
+            let _ = stream.read(&mut discard);
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/real\r\nContent-Length: 0\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        });
+        let mut response = get(
+            &format!("http://{origin_addr}/track"),
+            &[("Authorization".to_string(), "Bearer secret".to_string())],
+        )
+        .unwrap();
+        let mut body = Vec::new();
+        response.read_to_end(&mut body).unwrap();
+        assert_eq!(body, b"clean");
+    }
+
+    #[test]
+    fn rejects_header_injection() {
+        assert!(get(
+            "http://127.0.0.1:1/x",
+            &[("X-Ok".to_string(), "v\r\nInjected: yes".to_string())],
+        )
+        .is_err());
+        assert!(get(
+            "http://127.0.0.1:1/x",
+            &[("Bad Name".to_string(), "v".to_string())],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn parses_query_without_path_and_strips_fragments() {
+        let u = parse_url("http://example.com?q=1").unwrap();
+        assert_eq!(u.host, "example.com");
+        assert_eq!(u.path, "/?q=1");
+        let u = parse_url("https://example.com/a#frag").unwrap();
+        assert_eq!(u.path, "/a");
+        assert!(parse_url("http://user:pass@example.com/").is_err());
+        assert!(parse_url("http://[::1]:8080/").is_err());
     }
 
     /// Exercises the real TLS path against a live host. Ignored by default
