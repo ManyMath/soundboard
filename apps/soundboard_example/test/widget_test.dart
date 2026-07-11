@@ -2,7 +2,6 @@
 // drive the native virtual-mic path (that needs a device and is verified by
 // running the app); it just confirms the UI renders past the initial load.
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:soundboard_example/main.dart';

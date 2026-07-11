@@ -29,10 +29,7 @@ class SoundboardApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Soundboard',
-      theme: ThemeData(
-        colorSchemeSeed: Colors.indigo,
-        useMaterial3: true,
-      ),
+      theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
       home: const HomePage(),
     );
   }
@@ -92,11 +89,20 @@ class _HomePageState extends State<HomePage> {
       _busy = true;
       _error = null;
     });
+    // Each resource is assigned to its state field the moment it exists, so
+    // the catch below can always tear down whatever was created before the
+    // failure (otherwise an error after startRecording would leave the
+    // microphone capturing with no handle to stop it).
     try {
       // Microphone capture needs permission; ask before wiring the mix.
-      await Microphone.requestPermission();
+      if (!await Microphone.requestPermission()) {
+        if (mounted) {
+          setState(() => _error = 'Microphone permission was denied.');
+        }
+        return;
+      }
 
-      final board = Soundboard(format: _fmt)
+      final board = _board = Soundboard(format: _fmt)
         ..masterVolume = _masterVolume
         ..micVolume = _micVolume;
       _beep = board.loadBytes(
@@ -105,30 +111,32 @@ class _HomePageState extends State<HomePage> {
       );
       _chord = board.loadBytes(_chordTone(_fmt), format: _fmt);
 
-      // Bind the chosen input device (null = system default).
-      final physicalMic = _DeviceBoundBackend(
-        Microphone.backend,
-        _selectedDeviceId,
-      );
-      final recording = await board
-          .asMicrophoneBackend(physicalMic: physicalMic)
-          .startRecording(format: _fmt);
+      // retainPcm: false -- a live session is open-ended, so the recording
+      // must not accumulate the whole session's PCM in memory. deviceId binds
+      // the chosen input (null = system default).
+      final recording = _recording = await board
+          .asMicrophoneBackend()
+          .startRecording(
+            format: _fmt,
+            deviceId: _selectedDeviceId,
+            retainPcm: false,
+          );
 
-      final vmic = await VirtualMicPlatform.create(format: _fmt);
-      unawaited(vmic.feed(recording.frames));
+      final vmic = _vmic = await VirtualMicPlatform.create(format: _fmt);
+      unawaited(
+        vmic.feed(recording.frames).catchError((Object e) {
+          if (mounted) setState(() => _error = 'Feeding stopped: $e');
+        }),
+      );
 
       // Refresh the device list now that permission likely granted names.
       final inputs = await Microphone.devices();
 
       if (!mounted) {
-        await vmic.dispose();
-        await board.dispose();
+        await _teardown();
         return;
       }
       setState(() {
-        _board = board;
-        _vmic = vmic;
-        _recording = recording;
         _inputs = inputs;
         _live = true;
       });
@@ -153,18 +161,26 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  bool _tearingDown = false;
+
   Future<void> _teardown() async {
-    await _recording?.stop().catchError((Object _) => Uint8List(0));
-    await _vmic?.dispose();
-    await _board?.dispose();
-    _recording = null;
-    _vmic = null;
-    _board = null;
+    if (_tearingDown) return;
+    _tearingDown = true;
+    try {
+      await _recording?.stop().catchError((Object _) => Uint8List(0));
+      await _vmic?.dispose();
+      await _board?.dispose();
+      _recording = null;
+      _vmic = null;
+      _board = null;
+    } finally {
+      _tearingDown = false;
+    }
   }
 
   @override
   void dispose() {
-    _teardown();
+    unawaited(_teardown());
     super.dispose();
   }
 
@@ -408,39 +424,6 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
-}
-
-/// Wraps a capture backend and pins it to a chosen input [deviceId] (null =
-/// system default), so the soundboard's physical-mic source captures from the
-/// device the user picked.
-class _DeviceBoundBackend extends CaptureBackend {
-  _DeviceBoundBackend(this._inner, this._deviceId);
-
-  final CaptureBackend _inner;
-  final String? _deviceId;
-
-  @override
-  String get name => 'device(${_inner.name})';
-  @override
-  int get priority => _inner.priority;
-  @override
-  bool get isAvailable => _inner.isAvailable;
-  @override
-  Future<void> initialize() => _inner.initialize();
-  @override
-  Future<bool> hasPermission() => _inner.hasPermission();
-  @override
-  Future<bool> requestPermission() => _inner.requestPermission();
-  @override
-  Future<List<CaptureDevice>> devices() => _inner.devices();
-  @override
-  Future<void> dispose() => _inner.dispose();
-
-  @override
-  Future<Recording> startRecording({
-    CaptureFormat format = const CaptureFormat(),
-    String? deviceId,
-  }) => _inner.startRecording(format: format, deviceId: deviceId ?? _deviceId);
 }
 
 // --- test tones ------------------------------------------------------------
