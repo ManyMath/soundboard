@@ -46,12 +46,19 @@ Future<void> main() async {
   );
 
   // mic + clips -> a recording whose frames we stream into the virtual device.
+  // retainPcm: false -- the session is open-ended, so do not accumulate it.
   final recording = await board.asMicrophoneBackend().startRecording(
     format: fmt,
+    retainPcm: false,
   );
   final vmic = await CoreAudioVirtualMic.create(format: fmt);
-  // feed() runs until the stream closes or dispose() is called; do not await it.
-  unawaited(vmic.feed(recording.frames));
+  // feed() completes when the stream closes or dispose() is called; a failure
+  // while live (device removed) surfaces here.
+  unawaited(
+    vmic.feed(recording.frames).catchError((Object e) {
+      stderr.writeln('feeding stopped: $e');
+    }),
+  );
 
   // Clean up the device if the user hits Ctrl-C.
   late final StreamSubscription<ProcessSignal> sigint;

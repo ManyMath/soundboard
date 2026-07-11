@@ -64,9 +64,7 @@ void main() {
       // Off macOS this is the unavailable subtype; on macOS with the lib built
       // it is the open-failure CoreAudioException. Both are CoreAudioException.
       expect(
-        () => CoreAudioVirtualMic.create(
-          deviceName: 'no-such-device-xyzzy-42',
-        ),
+        () => CoreAudioVirtualMic.create(deviceName: 'no-such-device-xyzzy-42'),
         throwsA(isA<CoreAudioException>()),
       );
     });

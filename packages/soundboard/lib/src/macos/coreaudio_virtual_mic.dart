@@ -28,8 +28,7 @@ class CoreAudioUnavailableException extends CoreAudioException {
 
 // --- C ABI signatures, mirroring native/sound_cli/src/lib.rs --------------
 
-typedef _SinkOpenNative =
-    Pointer<Void> Function(Pointer<Utf8>, Uint32, Uint32);
+typedef _SinkOpenNative = Pointer<Void> Function(Pointer<Utf8>, Uint32, Uint32);
 typedef _SinkOpen = Pointer<Void> Function(Pointer<Utf8>, int, int);
 typedef _SinkWriteNative = Int32 Function(Pointer<Void>, Pointer<Int16>, Size);
 typedef _SinkWrite = int Function(Pointer<Void>, Pointer<Int16>, int);
@@ -42,12 +41,7 @@ typedef _SinkLastError = Pointer<Utf8> Function();
 /// `sound_sink_*` entry points. Returns null when it cannot be loaded -- never
 /// throws -- so [CoreAudioVirtualMic.isSupported] can degrade gracefully.
 class _SinkBindings {
-  _SinkBindings._(
-    this.open,
-    this.write,
-    this.close,
-    this.lastError,
-  );
+  _SinkBindings._(this.open, this.write, this.close, this.lastError);
 
   final _SinkOpen open;
   final _SinkWrite write;
@@ -55,14 +49,20 @@ class _SinkBindings {
   final _SinkLastError lastError;
 
   static bool _attempted = false;
+  static String? _attemptedOverride;
   static _SinkBindings? _cached;
 
   /// Explicit path override for the dylib, highest priority. Set before use.
   static String? overridePath;
 
   static _SinkBindings? load() {
-    if (_attempted) return _cached;
+    // A successful load is cached forever; a failed one is retried only when
+    // [overridePath] has changed since the attempt (so setting it after a
+    // failed probe is not silently ignored).
+    if (_cached != null) return _cached;
+    if (_attempted && overridePath == _attemptedOverride) return null;
     _attempted = true;
+    _attemptedOverride = overridePath;
     final lib = _openLibrary();
     if (lib == null) return null;
     try {
@@ -80,9 +80,15 @@ class _SinkBindings {
     return _cached;
   }
 
+  /// The last sink error on the CURRENT thread. Errors are stored
+  /// thread-locally on the native side, so this must be called synchronously
+  /// after the failing call -- an intervening `await` may resume on another
+  /// thread and read an empty slot.
   String lastErrorString() {
     final p = lastError();
-    return p == nullptr ? 'unknown error' : p.toDartString();
+    if (p == nullptr) return 'unknown error';
+    final s = p.toDartString();
+    return s.isEmpty ? 'unknown error' : s;
   }
 
   static DynamicLibrary? _openLibrary() {
@@ -141,12 +147,17 @@ class _SinkBindings {
 /// final recording = await board.asMicrophoneBackend().startRecording(
 ///   format: fmt,
 /// );
-/// await vmic.feed(recording.frames);
+/// unawaited(vmic.feed(recording.frames));
 /// // ... the app now hears the soundboard on the "BlackHole 2ch" mic ...
 /// await vmic.dispose();
 /// ```
 class CoreAudioVirtualMic {
-  CoreAudioVirtualMic._(this._bindings, this._sink, this.deviceName, this.format);
+  CoreAudioVirtualMic._(
+    this._bindings,
+    this._sink,
+    this.deviceName,
+    this.format,
+  );
 
   /// The default loopback device routed into. BlackHole 2ch is a maintained,
   /// signed/notarized loopback installable with `brew install blackhole-2ch`.
@@ -163,6 +174,7 @@ class CoreAudioVirtualMic {
   bool _feeding = false;
   bool _disposed = false;
   StreamSubscription<Uint8List>? _sub;
+  Completer<void>? _feedDone;
   Pointer<Int16> _scratch = nullptr;
   int _scratchLen = 0;
 
@@ -220,20 +232,38 @@ class CoreAudioVirtualMic {
     return CoreAudioVirtualMic._(b, sink, deviceName, format);
   }
 
-  /// Streams [pcm] (interleaved S16LE frames at [format]) into the device until
-  /// [pcm] closes or [dispose] is called. Call once.
-  Future<void> feed(Stream<Uint8List> pcm) async {
+  /// Streams [pcm] (interleaved S16LE frames at [format]) into the device.
+  /// Call once.
+  ///
+  /// The returned future completes when [pcm] closes or [dispose] is called,
+  /// and completes with a [CoreAudioException] if the device stops accepting
+  /// audio (e.g. it was removed) or [pcm] emits an error. Callers that keep
+  /// running while feeding should not `await` it inline:
+  ///
+  /// ```dart
+  /// unawaited(vmic.feed(recording.frames));
+  /// ```
+  Future<void> feed(Stream<Uint8List> pcm) {
     if (_disposed) throw const CoreAudioException('virtual mic disposed');
     if (_feeding) throw StateError('feed() already called');
     _feeding = true;
-    final done = Completer<void>();
+    final done = _feedDone = Completer<void>();
     _sub = pcm.listen(
       _writeChunk,
-      onError: (Object _) {},
-      onDone: () => done.complete(),
-      cancelOnError: false,
+      onError: (Object e, StackTrace st) {
+        if (!done.isCompleted) done.completeError(e, st);
+        unawaited(dispose());
+      },
+      onDone: () {
+        if (!done.isCompleted) done.complete();
+      },
+      cancelOnError: true,
     );
-    return done.future;
+    // Errors surface to callers that await/listen; a caller that fires and
+    // forgets must not crash the app with an unhandled async error.
+    final future = done.future;
+    future.ignore();
+    return future;
   }
 
   void _writeChunk(Uint8List chunk) {
@@ -241,18 +271,28 @@ class CoreAudioVirtualMic {
     final samples = chunk.length ~/ 2;
     if (samples == 0) return;
     final buf = _ensureScratch(samples);
-    // S16LE bytes -> Int16: a straight reinterpret on little-endian hosts (all
-    // Apple silicon and Intel Macs), done explicitly so it is endianness-safe.
-    final view = ByteData.sublistView(chunk);
     final dst = buf.asTypedList(samples);
-    for (var i = 0; i < samples; i++) {
-      dst[i] = view.getInt16(i * 2, Endian.little);
+    if (Endian.host == Endian.little && chunk.offsetInBytes.isEven) {
+      // S16LE bytes -> Int16 is a straight reinterpret on little-endian hosts
+      // (all Apple silicon and Intel Macs).
+      dst.setRange(0, samples, Int16List.sublistView(chunk, 0, samples));
+    } else {
+      final view = ByteData.sublistView(chunk);
+      for (var i = 0; i < samples; i++) {
+        dst[i] = view.getInt16(i * 2, Endian.little);
+      }
     }
     final n = _bindings.write(_sink, buf, samples);
     if (n < 0) {
-      // A write failure (e.g. the device went away) ends feeding; surface it by
-      // tearing down rather than spamming the device.
-      dispose();
+      // A write failure (e.g. the device went away) ends feeding; capture the
+      // error synchronously (the native slot is thread-local), surface it on
+      // the feed future, and tear down rather than spamming the device.
+      final err = CoreAudioException(
+        'writing to "$deviceName" failed: ${_bindings.lastErrorString()}',
+      );
+      final done = _feedDone;
+      if (done != null && !done.isCompleted) done.completeError(err);
+      unawaited(dispose());
     }
   }
 
@@ -264,10 +304,13 @@ class CoreAudioVirtualMic {
     return _scratch;
   }
 
-  /// Closes the sink and stops feeding. Idempotent.
+  /// Closes the sink and stops feeding. Idempotent. Completes a pending
+  /// [feed] future.
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    final done = _feedDone;
+    if (done != null && !done.isCompleted) done.complete();
     await _sub?.cancel();
     _sub = null;
     if (_sink != nullptr) {

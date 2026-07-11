@@ -81,7 +81,7 @@ class PipeWireCommands {
 /// ```dart
 /// final vmic = await PipeWireVirtualMic.create(name: 'Soundboard', format: f);
 /// final recording = await board.asMicrophoneBackend().startRecording(format: f);
-/// await vmic.feed(recording.frames);
+/// unawaited(vmic.feed(recording.frames));
 /// // ... the app now hears the soundboard on the "Soundboard" mic ...
 /// await vmic.dispose();
 /// ```
@@ -115,12 +115,13 @@ class PipeWireVirtualMic {
   bool _disposed = false;
 
   /// Whether this environment can host a PipeWire virtual microphone: Linux,
-  /// with `pw-loopback`/`pw-cat` installed and a running PipeWire session.
-  /// Never throws.
+  /// with `pw-loopback`/`pw-cat`/`pw-cli` installed and a running PipeWire
+  /// session. Never throws.
   static Future<bool> isSupported() async {
     if (!Platform.isLinux) return false;
-    if (!await _hasTool('pw-loopback') || !await _hasTool('pw-cat')) {
-      return false;
+    // pw-cli is needed too: create() uses it to confirm the node registered.
+    for (final tool in const ['pw-loopback', 'pw-cat', 'pw-cli']) {
+      if (!await _hasTool(tool)) return false;
     }
     return _pipewireRunning();
   }
@@ -162,8 +163,17 @@ class PipeWireVirtualMic {
     return mic;
   }
 
-  /// Streams [pcm] (interleaved S16LE frames at [format]) into the device until
-  /// [pcm] closes or [dispose] is called. Call once.
+  /// Streams [pcm] (interleaved S16LE frames at [format]) into the device.
+  /// Call once.
+  ///
+  /// The returned future completes when [pcm] closes or [dispose] is called,
+  /// and completes with a [PipeWireException] if feeding fails while the mic
+  /// is still live (e.g. pw-cat died). Callers that keep running while feeding
+  /// should not `await` it inline:
+  ///
+  /// ```dart
+  /// unawaited(vmic.feed(recording.frames));
+  /// ```
   Future<void> feed(Stream<Uint8List> pcm) async {
     if (_disposed) throw const PipeWireException('virtual mic disposed');
     if (_feeder != null) throw StateError('feed() already called');
@@ -181,21 +191,35 @@ class PipeWireVirtualMic {
       throw PipeWireException('failed to start pw-cat: $e');
     }
     _feeder = feeder;
-    // Writing to a killed feeder raises a broken-pipe error on dispose; swallow
-    // it since that is the normal way feeding ends.
-    _feedDone = feeder.stdin
+    // Writing to a killed feeder raises a broken-pipe error on dispose; that
+    // is the normal way feeding ends, so it only surfaces as an error when the
+    // mic is still supposed to be live.
+    final done = feeder.stdin
         .addStream(pcm)
         .then((_) => feeder.stdin.close())
-        .catchError((Object _) {});
+        .then<void>(
+          (_) {},
+          onError: (Object e) {
+            if (!_disposed) {
+              throw PipeWireException(
+                'feeding the virtual microphone failed: $e',
+              );
+            }
+          },
+        );
+    // dispose() awaits the swallowed variant so it never rethrows there.
+    _feedDone = done.catchError((Object _) {});
+    return done;
   }
 
   /// Removes the virtual microphone by stopping its processes. Idempotent.
+  /// Completes a pending [feed] future.
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
     _feeder?.kill();
     _loopback.kill();
-    await _feedDone?.catchError((Object _) {});
+    await _feedDone;
     await _safeExit(_feeder);
     await _safeExit(_loopback);
   }
