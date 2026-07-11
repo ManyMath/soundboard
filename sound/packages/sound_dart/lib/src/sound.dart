@@ -145,6 +145,12 @@ class Sound {
   /// platform, including the web (where [FileSource] does not). On a native
   /// backend that supports it, playback can start before [url] finishes
   /// downloading; see [SoundSource.uri].
+  ///
+  /// [headers] are only sent to [url]'s own origin; a redirect to another
+  /// host, port, or scheme drops them so credentials cannot leak. Note the
+  /// native backend keeps both the download and the decoded PCM in memory for
+  /// the playback's lifetime (which makes seek/loop instant), so this suits
+  /// tracks, not open-ended live streams.
   static Future<Playback> loadUrl(
     String url, {
     Map<String, String> headers = const {},

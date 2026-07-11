@@ -599,6 +599,9 @@ class FfiPlayback implements Playback {
 
   @override
   Future<void> seek(Duration position) async {
+    // _rate is 0 while a URL voice is still connecting (the stream's rate is
+    // unknown until the first chunk decodes), so a seek during that window is
+    // a no-op rather than a guess at the frame index.
     if (_voiceId != 0 && _rate > 0) {
       final frame = position.inMicroseconds * _rate ~/ 1000000;
       _b.seek(_player, _voiceId, frame < 0 ? 0 : frame);
