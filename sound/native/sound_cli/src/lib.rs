@@ -1399,7 +1399,7 @@ pub unsafe extern "C" fn sound_sink_write(
     let sink = &*sink;
     let slice = std::slice::from_raw_parts(samples, len);
     match sink.write(slice) {
-        Ok(frames) => frames as i32,
+        Ok(frames) => i32::try_from(frames).unwrap_or(i32::MAX),
         Err(e) => {
             set_sink_error(e);
             -1

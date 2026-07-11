@@ -16,8 +16,9 @@
 
 use std::os::raw::{c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::Mutex;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use libloading::Library;
 
@@ -92,7 +93,6 @@ type FnEnqueue =
 type FnStart = unsafe extern "C" fn(AudioQueueRef, *mut c_void) -> c_int;
 type FnStop = unsafe extern "C" fn(AudioQueueRef, u8) -> c_int;
 type FnDispose = unsafe extern "C" fn(AudioQueueRef, u8) -> c_int;
-type FnFreeBuffer = unsafe extern "C" fn(AudioQueueRef, AudioQueueBufferRef) -> c_int;
 
 type FnGetSize = unsafe extern "C" fn(
     AudioObjectID,
@@ -131,7 +131,6 @@ struct Libs {
     start: FnStart,
     stop: FnStop,
     dispose: FnDispose,
-    free_buffer: FnFreeBuffer,
     get_size: FnGetSize,
     get_data: FnGetData,
     cfstring_create: FnCFStringCreate,
@@ -190,7 +189,6 @@ impl Libs {
                 start: sym!(at, b"AudioQueueStart\0"),
                 stop: sym!(at, b"AudioQueueStop\0"),
                 dispose: sym!(at, b"AudioQueueDispose\0"),
-                free_buffer: sym!(at, b"AudioQueueFreeBuffer\0"),
                 get_size: sym!(ca, b"AudioObjectGetPropertyDataSize\0"),
                 get_data: sym!(ca, b"AudioObjectGetPropertyData\0"),
                 cfstring_create: sym!(cf, b"CFStringCreateWithBytes\0"),
@@ -324,7 +322,7 @@ pub struct Sink {
     tx: SyncSender<Vec<i16>>,
     channel: Box<Channel>,
     buffers: Vec<AudioQueueBufferRef>,
-    started: std::cell::Cell<bool>,
+    started: AtomicBool,
 }
 
 unsafe impl Send for Sink {}
@@ -333,10 +331,27 @@ const RING_BUFFERS: u32 = 4;
 const FRAMES_PER_BUFFER: u32 = 2048;
 const OUT_CHANNELS: u32 = 2; // device output is stereo (Float32)
 
+// How long `write` waits for the render callback to drain a slot before giving
+// up. A healthy queue frees a slot every ~43 ms (2048 frames at 48 kHz), so a
+// second of no progress means the device stopped pulling (unplugged, failed).
+const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Locks ignoring poisoning: these mutexes guard plain data (no invariants a
+/// panic could break), and the render callback must never panic itself, which
+/// `unwrap()` on a poisoned lock would.
+fn lock_unpoisoned<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl Sink {
     pub fn open(device: &str, rate: u32, channels: u32) -> Result<Sink, String> {
         let libs = Libs::load()?;
-        let src_channels = channels.clamp(1, 2);
+        if !(1..=2).contains(&channels) {
+            return Err(format!(
+                "unsupported channel count {channels} (the sink takes mono or stereo)"
+            ));
+        }
+        let src_channels = channels;
         let uid = unsafe { libs.find_device_uid(device)? };
 
         let asbd = AudioStreamBasicDescription {
@@ -419,34 +434,61 @@ impl Sink {
                 tx,
                 channel,
                 buffers,
-                started: std::cell::Cell::new(false),
+                started: AtomicBool::new(false),
             })
         }
     }
 
     fn ensure_started(&self) -> Result<(), String> {
-        if self.started.get() {
+        // compare_exchange so exactly one caller starts the queue even if the
+        // C ABI is driven from multiple threads.
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return Ok(());
         }
         unsafe {
             let rc = (self.libs.start)(self.queue, std::ptr::null_mut());
             if rc != 0 {
+                self.started.store(false, Ordering::Release);
                 return Err(format!("AudioQueueStart: {rc}"));
             }
         }
-        self.started.set(true);
         Ok(())
     }
 
     /// Queues `samples` (interleaved S16LE at the source channel count) for the
     /// device. Returns the number of source frames queued.
+    ///
+    /// Blocks briefly when the ring is full (that is the backpressure that
+    /// paces a faster-than-real-time producer), but never indefinitely: if the
+    /// device stops draining for [WRITE_STALL_TIMEOUT] the write fails instead
+    /// of freezing the caller.
     pub fn write(&self, samples: &[i16]) -> Result<usize, String> {
         self.ensure_started()?;
         let stride = FRAMES_PER_BUFFER as usize * self.channel.src_channels as usize;
         for chunk in samples.chunks(stride) {
-            self.tx
-                .send(chunk.to_vec())
-                .map_err(|e| format!("audio channel closed: {e}"))?;
+            let mut item = chunk.to_vec();
+            let deadline = Instant::now() + WRITE_STALL_TIMEOUT;
+            loop {
+                match self.tx.try_send(item) {
+                    Ok(()) => break,
+                    Err(TrySendError::Full(back)) => {
+                        if Instant::now() >= deadline {
+                            return Err("audio device stalled: the output stopped draining \
+                                 (device removed or failed?)"
+                                .into());
+                        }
+                        item = back;
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        return Err("audio channel closed".into());
+                    }
+                }
+            }
         }
         Ok(samples.len() / self.channel.src_channels as usize)
     }
@@ -456,12 +498,12 @@ impl Sink {
 /// carry-over. Returns None when nothing is queued.
 fn next_chunk(channel: &Channel) -> Option<Vec<i16>> {
     {
-        let mut pending = channel.pending.lock().unwrap();
+        let mut pending = lock_unpoisoned(&channel.pending);
         if !pending.is_empty() {
             return Some(std::mem::take(&mut *pending));
         }
     }
-    let rx = channel.rx.lock().unwrap();
+    let rx = lock_unpoisoned(&channel.rx);
     rx.try_recv().ok()
 }
 
@@ -474,6 +516,10 @@ unsafe extern "C" fn output_cb(
     buf: AudioQueueBufferRef,
 ) {
     let channel = &*(user_data as *const Channel);
+    // The sink is being torn down; do not touch or re-enqueue the buffer.
+    if channel.closed.load(Ordering::Acquire) {
+        return;
+    }
     let cap_bytes = (*buf).audio_data_bytes_capacity as usize;
     let cap_frames = cap_bytes / (OUT_CHANNELS as usize * 4);
     let dst = (*buf).audio_data as *mut f32;
@@ -502,7 +548,7 @@ unsafe extern "C" fn output_cb(
         // Stash any frames that did not fit this buffer for the next callback.
         if take < chunk_frames {
             let rest = chunk[take * src_ch..].to_vec();
-            *channel.pending.lock().unwrap() = rest;
+            *lock_unpoisoned(&channel.pending) = rest;
             break;
         }
     }
@@ -514,7 +560,6 @@ unsafe extern "C" fn output_cb(
         *dst.add(base + 1) = 0.0;
     }
     (*buf).audio_data_byte_size = cap_bytes as u32;
-    let _ = channel.closed.load(Ordering::Relaxed);
     (channel.enqueue)(queue, buf, 0, std::ptr::null());
 }
 
@@ -522,14 +567,14 @@ impl Drop for Sink {
     fn drop(&mut self) {
         self.channel.closed.store(true, Ordering::SeqCst);
         unsafe {
-            if self.started.get() {
+            if self.started.load(Ordering::Acquire) {
                 (self.libs.stop)(self.queue, 1);
             }
-            for buf in self.buffers.drain(..) {
-                (self.libs.free_buffer)(self.queue, buf);
-            }
+            // AudioQueueDispose(immediate) synchronizes with in-flight
+            // callbacks and frees the queue-owned buffers.
             (self.libs.dispose)(self.queue, 1);
         }
+        self.buffers.clear();
         // Keep Channel alive until after the queue is gone so the callback
         // cannot deref a freed pointer mid-stop.
         let _ = &self.channel;
