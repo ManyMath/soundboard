@@ -154,11 +154,20 @@ impl LiveBuffer {
     }
 
     /// Blocks until at least `upto` samples are available, decoding has
-    /// finished, or decoding has failed.
-    fn wait_until(&self, upto: usize) {
+    /// finished, decoding has failed, or `stop` is set. The stop check is why
+    /// this polls with a timed wait: a stalled network feeder may never
+    /// notify again, and a voice being freed must not hang its caller.
+    fn wait_until(&self, upto: usize, stop: &AtomicBool) {
         let mut state = self.state.lock().unwrap();
-        while state.samples.len() < upto && state.final_len.is_none() {
-            state = self.ready.wait(state).unwrap();
+        while state.samples.len() < upto
+            && state.final_len.is_none()
+            && !stop.load(Ordering::SeqCst)
+        {
+            let (s, _) = self
+                .ready
+                .wait_timeout(state, std::time::Duration::from_millis(50))
+                .unwrap();
+            state = s;
         }
     }
 }
@@ -172,14 +181,15 @@ enum Samples {
 }
 
 impl Samples {
-    /// Blocks until at least `upto` samples exist or no more are coming,
-    /// then returns the number currently available and whether that number
-    /// is final (no more will ever be produced).
-    fn wait_len(&self, upto: usize) -> (usize, bool) {
+    /// Blocks until at least `upto` samples exist, no more are coming, or
+    /// `stop` is set, then returns the number currently available and whether
+    /// that number is final (no more will ever be produced). Callers must
+    /// re-check `stop` after this returns.
+    fn wait_len(&self, upto: usize, stop: &AtomicBool) -> (usize, bool) {
         match self {
             Samples::Complete(v) => (v.len(), true),
             Samples::Live(live) => {
-                live.wait_until(upto);
+                live.wait_until(upto, stop);
                 let state = live.state.lock().unwrap();
                 (state.samples.len(), state.final_len.is_some())
             }
@@ -532,14 +542,17 @@ fn run_voice_url<S: PcmSink>(
     sh: &VoiceShared,
     open_sink: impl FnOnce(u32, u32) -> Result<S, String>,
 ) {
-    let mut decoder = match decode::open_url_decoder(url, headers, format_hint.as_deref()) {
-        Ok(d) => d,
-        Err(e) => {
-            *sh.error.lock().unwrap() = Some(e);
-            sh.state.store(STATE_ERROR, Ordering::SeqCst);
-            return;
-        }
-    };
+    // The voice's stop flag doubles as the download-abort signal, so freeing
+    // or stopping the voice cancels the fetch and unblocks the probe/decode.
+    let mut decoder =
+        match decode::open_url_decoder(url, headers, format_hint.as_deref(), sh.stop.clone()) {
+            Ok(d) => d,
+            Err(e) => {
+                *sh.error.lock().unwrap() = Some(e);
+                sh.state.store(STATE_ERROR, Ordering::SeqCst);
+                return;
+            }
+        };
     let first_chunk = match decoder.next_chunk() {
         Ok(Some(chunk)) => chunk,
         Ok(None) => {
@@ -568,7 +581,13 @@ fn run_voice_url<S: PcmSink>(
         (first_chunk.len() / channels.max(1) as usize) as u64,
         Ordering::SeqCst,
     );
-    spawn_decode_feeder(decoder, live.clone(), channels, total_frames);
+    spawn_decode_feeder(
+        decoder,
+        live.clone(),
+        channels,
+        total_frames,
+        sh.stop.clone(),
+    );
 
     let sink = open_sink(channels, decoder_rate);
     run_voice(sink, channels, Samples::Live(live), sh);
@@ -577,15 +596,23 @@ fn run_voice_url<S: PcmSink>(
 /// Decodes the rest of `decoder`'s stream on a background thread, pushing
 /// each chunk into `live` and growing `total_frames` as frames become known.
 /// Runs independently of the playback thread, which only ever reads `live`.
+/// Exits when the stream ends, decoding fails, or `stop` is set (so a
+/// stopped/freed voice does not keep decoding -- and, via the decoder's
+/// streaming source, downloading -- an unbounded stream forever).
 fn spawn_decode_feeder(
     mut decoder: StreamDecoder,
     live: Arc<LiveBuffer>,
     channels: u32,
     total_frames: Arc<AtomicU64>,
-) -> JoinHandle<()> {
+    stop: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || {
         let channels = channels.max(1) as u64;
         loop {
+            if stop.load(Ordering::SeqCst) {
+                live.finish(None);
+                return;
+            }
             match decoder.next_chunk() {
                 Ok(Some(chunk)) => {
                     live.push(&chunk);
@@ -601,7 +628,7 @@ fn spawn_decode_feeder(
                 }
             }
         }
-    })
+    });
 }
 
 /// Opens the result of a platform sink and, on success, runs the playback loop.
@@ -658,7 +685,7 @@ fn play_pcm<S: PcmSink>(pcm: &S, channels: u32, samples: Samples, sh: &VoiceShar
         let seek = sh.seek_request.swap(NO_SEEK, Ordering::SeqCst);
         if seek >= 0 {
             let target = (seek as usize).saturating_mul(channels);
-            let (available, _) = samples.wait_len(target);
+            let (available, _) = samples.wait_len(target, &sh.stop);
             i = target.min(available);
             sh.position.store((i / channels) as u64, Ordering::SeqCst);
         }
@@ -671,9 +698,14 @@ fn play_pcm<S: PcmSink>(pcm: &S, channels: u32, samples: Samples, sh: &VoiceShar
             continue;
         }
 
-        // Blocks (for `Samples::Live`) until either one more sample exists
-        // or decoding has finished with nothing more to give.
-        let (available, is_final) = samples.wait_len(i + 1);
+        // Blocks (for `Samples::Live`) until either one more sample exists,
+        // decoding has finished with nothing more to give, or the voice is
+        // stopped (which also unblocks the wait).
+        let (available, is_final) = samples.wait_len(i + 1, &sh.stop);
+        if sh.stop.load(Ordering::SeqCst) {
+            sh.state.store(STATE_STOPPED, Ordering::SeqCst);
+            return;
+        }
 
         if let Some(e) = samples.take_error() {
             *sh.error.lock().unwrap() = Some(e);
@@ -856,12 +888,16 @@ pub unsafe extern "C" fn sound_play_file(
 /// reason in [sound_voice_error], the same as a failure partway through an
 /// already-playing stream.
 ///
+/// Memory note: both the compressed download and the decoded PCM are held in
+/// memory for the voice's lifetime (that is what makes seek/loop instant), so
+/// this suits tracks, not open-ended live streams.
+///
 /// # Safety
 /// `url` must be a valid NUL-terminated UTF-8 C string. `header_names` and
 /// `header_values` must each point to `header_count` valid NUL-terminated C
 /// strings (parallel arrays: `header_names[i]`/`header_values[i]` is one
 /// header). `format` is an optional NUL-terminated extension hint (e.g.
-/// "mp3"); pass null to auto-detect from the URL's path or the response.
+/// "mp3"); pass null to let the probe detect the container from the bytes.
 /// `looping` is nonzero to repeat from the start at end of audio.
 #[no_mangle]
 pub unsafe extern "C" fn sound_play_url(
@@ -937,8 +973,8 @@ unsafe fn read_headers(
     Ok(headers)
 }
 
-/// Returns the voice state (0 playing, 1 completed, 2 stopped, 3 error), or -1
-/// if the id is unknown.
+/// Returns the voice state (0 playing, 1 completed, 2 stopped, 3 error,
+/// 4 paused, 5 connecting), or -1 if the id is unknown.
 #[no_mangle]
 pub extern "C" fn sound_voice_state(player: *mut Player, id: u64) -> c_int {
     let Some(player) = with_player(player) else {

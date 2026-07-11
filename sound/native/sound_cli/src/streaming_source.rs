@@ -12,8 +12,10 @@
 //! existing bytes/file sources after `symphonia` decodes them.
 
 use std::io::{self, Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use symphonia::core::io::MediaSource;
 
@@ -32,18 +34,30 @@ struct Shared {
 
 /// A growable-buffer-backed streaming source fed by a background fetch
 /// thread. See the module docs for the buffering/seek tradeoffs.
+///
+/// The fetch thread stops when the download ends, when `stop` (the flag
+/// passed to [StreamingSource::fetch], typically the owning voice's stop
+/// flag) is set, or when the source is dropped -- so stopping or freeing a
+/// voice does not leak a thread that downloads the rest of the response.
 pub struct StreamingSource {
     shared: Arc<(Mutex<Shared>, Condvar)>,
     pos: u64,
-    /// Kept only to detach the thread on drop the same way it exits.
-    _handle: Option<thread::JoinHandle<()>>,
+    /// External stop signal (the voice's); also unblocks waiting readers.
+    stop: Arc<AtomicBool>,
+    /// Set on drop so the fetch thread exits when nobody can read anymore.
+    dropped: Arc<AtomicBool>,
 }
 
 impl StreamingSource {
     /// Starts fetching `url` (with `headers`) in a background thread and
     /// returns a source that can be handed to `symphonia` immediately —
-    /// reads block until enough of the response has arrived.
-    pub fn fetch(url: String, headers: Vec<(String, String)>) -> StreamingSource {
+    /// reads block until enough of the response has arrived. Setting `stop`
+    /// aborts the download and unblocks any waiting read with an error.
+    pub fn fetch(
+        url: String,
+        headers: Vec<(String, String)>,
+        stop: Arc<AtomicBool>,
+    ) -> StreamingSource {
         let shared = Arc::new((
             Mutex::new(Shared {
                 buf: Vec::new(),
@@ -53,16 +67,26 @@ impl StreamingSource {
             }),
             Condvar::new(),
         ));
+        let dropped = Arc::new(AtomicBool::new(false));
         let worker_shared = shared.clone();
-        let handle = thread::spawn(move || Self::run(url, headers, worker_shared));
+        let worker_stop = stop.clone();
+        let worker_dropped = dropped.clone();
+        thread::spawn(move || Self::run(url, headers, worker_shared, worker_stop, worker_dropped));
         StreamingSource {
             shared,
             pos: 0,
-            _handle: Some(handle),
+            stop,
+            dropped,
         }
     }
 
-    fn run(url: String, headers: Vec<(String, String)>, shared: Arc<(Mutex<Shared>, Condvar)>) {
+    fn run(
+        url: String,
+        headers: Vec<(String, String)>,
+        shared: Arc<(Mutex<Shared>, Condvar)>,
+        stop: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+    ) {
         let (lock, cvar) = &*shared;
         let mut response = match net::get(&url, &headers) {
             Ok(r) => r,
@@ -92,6 +116,11 @@ impl StreamingSource {
 
         let mut chunk = [0u8; 64 * 1024];
         loop {
+            if stop.load(Ordering::SeqCst) || dropped.load(Ordering::SeqCst) {
+                let mut state = lock.lock().unwrap();
+                state.error.get_or_insert_with(|| "fetch cancelled".into());
+                break;
+            }
             match response.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -111,13 +140,21 @@ impl StreamingSource {
         cvar.notify_all();
     }
 
-    /// Blocks until at least `upto` bytes are buffered, or the fetch is done
-    /// (successfully or with an error).
+    /// Blocks until at least `upto` bytes are buffered, the fetch is done
+    /// (successfully or with an error), or [Self::stop] is set.
     fn wait_until(&self, upto: u64) -> io::Result<()> {
         let (lock, cvar) = &*self.shared;
         let mut state = lock.lock().unwrap();
         while (state.buf.len() as u64) < upto && !state.done {
-            state = cvar.wait(state).unwrap();
+            // Not ErrorKind::Interrupted -- Read wrappers retry on that, which
+            // would turn a stop into a busy loop.
+            if self.stop.load(Ordering::SeqCst) {
+                return Err(io::Error::other("playback stopped"));
+            }
+            // A timed wait so the stop flag is observed even when no data or
+            // completion notification ever arrives.
+            let (s, _) = cvar.wait_timeout(state, Duration::from_millis(50)).unwrap();
+            state = s;
         }
         if let Some(e) = &state.error {
             if (state.buf.len() as u64) < upto {
@@ -125,6 +162,13 @@ impl StreamingSource {
             }
         }
         Ok(())
+    }
+}
+
+impl Drop for StreamingSource {
+    fn drop(&mut self) {
+        // Nobody can read anymore; tell the fetch thread to stop downloading.
+        self.dropped.store(true, Ordering::SeqCst);
     }
 }
 
@@ -215,12 +259,16 @@ mod tests {
         format!("http://{addr}/track")
     }
 
+    fn no_stop() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
     #[test]
     fn reads_full_body_as_it_arrives() {
         let body: Vec<u8> = (0u8..=255).collect();
         let leaked: &'static [u8] = Box::leak(body.clone().into_boxed_slice());
         let url = serve_slowly(leaked, 16);
-        let mut source = StreamingSource::fetch(url, Vec::new());
+        let mut source = StreamingSource::fetch(url, Vec::new(), no_stop());
         let mut got = Vec::new();
         source.read_to_end(&mut got).unwrap();
         assert_eq!(got, body);
@@ -230,7 +278,7 @@ mod tests {
     fn byte_len_reflects_content_length() {
         let body: &'static [u8] = b"hello world, this is a streamed body";
         let url = serve_slowly(body, 8);
-        let mut source = StreamingSource::fetch(url, Vec::new());
+        let mut source = StreamingSource::fetch(url, Vec::new(), no_stop());
         // Force at least one read so byte_len (set from the response headers
         // before any body arrives) is populated deterministically in a test
         // without a race against the fetch thread's startup.
@@ -244,7 +292,7 @@ mod tests {
         let body: Vec<u8> = (0u8..=200).collect();
         let leaked: &'static [u8] = Box::leak(body.clone().into_boxed_slice());
         let url = serve_slowly(leaked, 32);
-        let mut source = StreamingSource::fetch(url, Vec::new());
+        let mut source = StreamingSource::fetch(url, Vec::new(), no_stop());
         let mut all = Vec::new();
         source.read_to_end(&mut all).unwrap();
         assert_eq!(all, body);
@@ -258,8 +306,39 @@ mod tests {
     #[test]
     fn propagates_fetch_error() {
         // Nothing is listening on this port.
-        let mut source = StreamingSource::fetch("http://127.0.0.1:1".to_string(), Vec::new());
+        let mut source =
+            StreamingSource::fetch("http://127.0.0.1:1".to_string(), Vec::new(), no_stop());
         let mut buf = [0u8; 8];
         assert!(source.read(&mut buf).is_err());
+    }
+
+    #[test]
+    fn stop_unblocks_a_waiting_read() {
+        // A server that sends headers and then nothing: a read would block
+        // until the 15s socket timeout. Setting the stop flag must unblock it
+        // promptly with an error instead.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut discard = [0u8; 4096];
+            let _ = stream.read(&mut discard);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
+                .unwrap();
+            thread::sleep(std::time::Duration::from_secs(5));
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut source =
+            StreamingSource::fetch(format!("http://{addr}/track"), Vec::new(), stop.clone());
+        let stopper = stop.clone();
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(100));
+            stopper.store(true, Ordering::SeqCst);
+        });
+        let start = std::time::Instant::now();
+        let mut buf = [0u8; 8];
+        assert!(source.read(&mut buf).is_err());
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 }

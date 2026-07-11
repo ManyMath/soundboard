@@ -3,6 +3,8 @@
 //! FLAC with no system dependencies.
 
 use std::io::Cursor;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{Decoder, DecoderOptions};
@@ -61,13 +63,15 @@ fn decode_all(mut decoder: StreamDecoder) -> Result<DecodedAudio, String> {
 /// consumes [StreamDecoder::next_chunk] incrementally so playback can begin
 /// before the whole response has arrived. [format_hint] is an optional file
 /// extension that helps the probe when the URL's path has no recognizable
-/// one.
+/// one. Setting `stop` aborts the download and unblocks a blocked
+/// [StreamDecoder::next_chunk].
 pub fn open_url_decoder(
     url: String,
     headers: Vec<(String, String)>,
     format_hint: Option<&str>,
+    stop: Arc<AtomicBool>,
 ) -> Result<StreamDecoder, String> {
-    let source = StreamingSource::fetch(url, headers);
+    let source = StreamingSource::fetch(url, headers, stop);
     let mss = MediaSourceStream::new(Box::new(source), Default::default());
     StreamDecoder::open(mss, format_hint)
 }
@@ -138,9 +142,16 @@ impl StreamDecoder {
         loop {
             let packet = match self.format.next_packet() {
                 Ok(p) => p,
-                // The standard formats signal end-of-stream as an IO error;
-                // treat that as a clean finish.
-                Err(SymphoniaError::IoError(_)) => return Ok(None),
+                // symphonia signals a clean end-of-stream as an UnexpectedEof
+                // IO error. Any OTHER IO error (a dropped connection, a read
+                // timeout, a truncated download) is a real failure and must
+                // not masquerade as successful completion.
+                Err(SymphoniaError::IoError(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Ok(None)
+                }
+                Err(SymphoniaError::IoError(e)) => return Err(format!("read error: {e}")),
                 Err(e) => return Err(format!("read error: {e}")),
             };
             if packet.track_id() != self.track_id {
@@ -158,7 +169,12 @@ impl StreamDecoder {
                     return Ok(Some(buf.samples().to_vec()));
                 }
                 Err(SymphoniaError::DecodeError(_)) => continue,
-                Err(SymphoniaError::IoError(_)) => return Ok(None),
+                Err(SymphoniaError::IoError(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Ok(None)
+                }
+                Err(SymphoniaError::IoError(e)) => return Err(format!("decode error: {e}")),
                 Err(e) => return Err(format!("decode error: {e}")),
             }
         }
@@ -327,7 +343,13 @@ mod tests {
         let wav = const_wav(2, 44_100, 16, SampleFormat::Int, 4_000, 777);
         let url = serve_slowly(wav);
 
-        let mut decoder = open_url_decoder(url, Vec::new(), Some("wav")).unwrap();
+        let mut decoder = open_url_decoder(
+            url,
+            Vec::new(),
+            Some("wav"),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
         let mut samples = Vec::new();
         let mut chunk_count = 0;
         while let Some(chunk) = decoder.next_chunk().unwrap() {
@@ -381,6 +403,7 @@ mod tests {
             url,
             vec![("Authorization".to_string(), "Bearer secret".to_string())],
             Some("wav"),
+            Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
         let mut samples = Vec::new();
