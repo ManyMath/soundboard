@@ -246,22 +246,47 @@ class _ClipBus {
   final StreamController<Uint8List> _controller =
       StreamController<Uint8List>.broadcast();
   Timer? _timer;
+  int _ticksHandled = 0;
+
+  // The most missed timer periods made up for in one callback. Dart coalesces
+  // periods missed during an event-loop stall into a single callback; emitting
+  // the shortfall keeps clips intact (the mixer pads the gap with silence and
+  // would otherwise chop the clip). Beyond the cap, drop instead of bursting
+  // unbounded latency into the stream.
+  static const int _maxCatchUpChunks = 6;
 
   /// The mixed clip-bus frames, interleaved S16LE at the mix format.
   Stream<Uint8List> get frames => _controller.stream;
 
   void play(Clip clip, double gain) {
+    if (_controller.isClosed) return; // disposed
     _voices.add(_ClipVoice(clip, gain));
-    _timer ??= Timer.periodic(_chunk, (_) => _tick());
+    if (_timer == null) {
+      _ticksHandled = 0;
+      _timer = Timer.periodic(_chunk, _tick);
+    }
   }
 
   void stopAll() => _voices.clear();
 
-  void _tick() {
-    if (_controller.isClosed || _voices.isEmpty) {
+  void _tick(Timer timer) {
+    if (_controller.isClosed) {
+      _voices.clear();
       _stop();
       return;
     }
+    // timer.tick counts the periods that should have fired so far; emit one
+    // chunk per period we have not handled yet (capped).
+    var due = timer.tick - _ticksHandled;
+    _ticksHandled = timer.tick;
+    if (due > _maxCatchUpChunks) due = _maxCatchUpChunks;
+    for (var i = 0; i < due && _voices.isNotEmpty; i++) {
+      _emitChunk();
+    }
+    if (_voices.isEmpty) _stop();
+  }
+
+  void _emitChunk() {
     final channels = _format.channels;
     final acc = Float64List(_chunkFrames * channels);
     for (final v in _voices) {
@@ -282,7 +307,6 @@ class _ClipBus {
       view.setInt16(i * 2, s, Endian.little);
     }
     if (!_controller.isClosed) _controller.add(out);
-    if (_voices.isEmpty) _stop();
   }
 
   void _stop() {

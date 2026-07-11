@@ -169,6 +169,52 @@ void main() {
       await board.dispose();
     });
 
+    test('a mono clip up-mixes into a stereo board by duplication', () async {
+      const stereo = CaptureFormat(sampleRate: 8000, channels: 2);
+      const mono = CaptureFormat(sampleRate: 8000, channels: 1);
+      final board = Soundboard(
+        format: stereo,
+        chunk: const Duration(milliseconds: 20),
+      );
+      final micCtrl = StreamController<Uint8List>();
+      final mic = StreamCaptureBackend(source: micCtrl.stream, format: stereo);
+      final rec = await board
+          .asMicrophoneBackend(physicalMic: mic)
+          .startRecording(format: stereo);
+
+      // 160 mono frames of 1000 -> 160 stereo frames of (1000, 1000).
+      board.play(board.loadBytes(pcm16(List.filled(160, 1000)), format: mono));
+      await settle();
+      micCtrl.add(pcm16(List.filled(320, 500))); // 160 stereo mic frames
+      await pump();
+
+      final out = samples16(rec.pcm);
+      expect(out.length, 320);
+      expect(out.every((v) => v == 1500), isTrue); // both channels get the sum
+      await rec.stop();
+      await micCtrl.close();
+      await board.dispose();
+    });
+
+    test('a stereo clip down-mixes into a mono board by averaging', () async {
+      const stereo = CaptureFormat(sampleRate: 8000, channels: 2);
+      final (board, micCtrl, rec) = await start(); // mono board
+      // 160 stereo frames of (1000, 3000) -> 160 mono samples of 2000.
+      final interleaved = List<int>.generate(
+        320,
+        (i) => i.isEven ? 1000 : 3000,
+      );
+      board.play(board.loadBytes(pcm16(interleaved), format: stereo));
+      await settle();
+      micCtrl.add(pcm16(List.filled(160, 500)));
+      await pump();
+
+      expect(samples16(rec.pcm).every((v) => v == 2500), isTrue); // 2000 + 500
+      await rec.stop();
+      await micCtrl.close();
+      await board.dispose();
+    });
+
     test('retainPcm: false streams frames without accumulating pcm', () async {
       final board = Soundboard(
         format: _fmt,
@@ -193,6 +239,20 @@ void main() {
       await micCtrl.close();
       await board.dispose();
     });
+
+    test(
+      'play after dispose is a no-op instead of restarting the bus',
+      () async {
+        final board = Soundboard(format: _fmt);
+        final clip = board.loadBytes(
+          pcm16(List.filled(160, 1000)),
+          format: _fmt,
+        );
+        await board.dispose();
+        board.play(clip); // must not throw or start a timer
+        board.stopAll();
+      },
+    );
 
     test('works when registered through the Microphone registry', () async {
       final board = Soundboard(
