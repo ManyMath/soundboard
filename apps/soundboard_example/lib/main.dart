@@ -3,9 +3,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:microphone_flutter/microphone_flutter.dart';
-import 'package:sound_flutter/sound_flutter.dart';
-import 'package:soundboard/soundboard.dart';
+import 'package:soundboard_flutter/soundboard_flutter.dart';
 
 import 'virtual_mic.dart';
 
@@ -17,8 +15,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // Eagerly load the native libraries so the first record/play has no latency
   // and load errors surface at startup.
-  await SoundFlutter.ensureInitialized();
-  await MicrophoneFlutter.ensureInitialized();
+  await SoundboardFlutter.ensureInitialized();
   runApp(const SoundboardApp());
 }
 

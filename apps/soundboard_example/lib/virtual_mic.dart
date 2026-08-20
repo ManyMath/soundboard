@@ -1,6 +1,7 @@
 // A tiny platform-neutral facade over the soundboard's OS-level virtual
-// microphones: CoreAudio (BlackHole) on macOS, PipeWire on Linux. The UI talks
-// to this and never touches the platform-specific classes directly.
+// microphones: CoreAudio (BlackHole) on macOS, PipeWire on Linux, and a
+// virtual-cable output (VB-CABLE by default) on Windows. The UI talks to this
+// and never touches the platform-specific classes directly.
 //
 // Both backends expose the same shape -- isSupported / create / feed / dispose
 // plus a display name -- so the facade just forwards to whichever platform is
@@ -10,9 +11,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:soundboard/coreaudio.dart';
-import 'package:soundboard/pipewire.dart';
-import 'package:soundboard/soundboard.dart';
+import 'package:soundboard_flutter/desktop.dart';
 
 /// What the running platform's virtual-microphone support looks like, for the
 /// UI to explain itself when unsupported.
@@ -70,10 +69,19 @@ abstract final class VirtualMicPlatform {
             'tools (install the "pipewire" package).',
       );
     }
+    if (Platform.isWindows) {
+      return VirtualMicSupport(
+        supported: await WindowsVirtualMic.isSupported(),
+        platformLabel: 'Windows (VB-CABLE)',
+        hint:
+            'Install VB-CABLE, restart Windows if prompted, then select '
+            '"CABLE Output" as the microphone in the target application.',
+      );
+    }
     return const VirtualMicSupport(
       supported: false,
       platformLabel: 'unsupported platform',
-      hint: 'A virtual microphone device is only available on macOS and Linux.',
+      hint: 'A virtual microphone is available on macOS, Windows, and Linux.',
     );
   }
 
@@ -90,6 +98,10 @@ abstract final class VirtualMicPlatform {
         format: format,
       );
       return VirtualMic._(mic.dispose, mic.feed, mic.name, mic.format);
+    }
+    if (Platform.isWindows) {
+      final mic = await WindowsVirtualMic.create(format: format);
+      return VirtualMic._(mic.dispose, mic.feed, mic.deviceName, mic.format);
     }
     throw StateError('virtual microphone is not supported on this platform');
   }

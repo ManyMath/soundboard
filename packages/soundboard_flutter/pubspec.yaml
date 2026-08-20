@@ -1,0 +1,28 @@
+name: soundboard_flutter
+description: Flutter integration, native builds, and asset loading for soundboard.
+version: 0.0.1
+publish_to: none
+repository: https://git.manymath.com/sneurlax/soundboard
+topics:
+  - audio
+  - soundboard
+  - microphone
+  - flutter
+
+environment:
+  sdk: ^3.10.0
+  flutter: '>=3.3.0'
+
+resolution: workspace
+
+dependencies:
+  flutter:
+    sdk: flutter
+  microphone_flutter: ^0.0.1
+  sound_flutter: ^0.0.1
+  soundboard: ^0.0.1
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter

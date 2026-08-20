@@ -5,19 +5,27 @@ publish_to: none
 # share a single lockfile. Melos drives multi-package tooling on top of this.
 #
 # The vendored sound/ and microphone/ monorepos each shipped their own
-# pub-workspace root (sound/pubspec.yaml, microphone/pubspec.yaml). A pub
-# workspace cannot nest, so those intermediate roots were removed when the
-# monorepos were flattened into this one; their leaf Dart packages are members
-# here directly. The vendored Flutter packages remain in the tree for Flutter
-# apps to depend on (built via cargokit) but are developed through their own
-# upstream tooling and are not members of this pure-Dart workspace.
+# pub-workspace root. A pub workspace cannot nest, so those intermediate roots
+# were removed and their leaf Dart and Flutter packages are members here.
 environment:
   sdk: ^3.10.0
 
 workspace:
   - sound/packages/sound_dart
+  - sound/packages/sound_flutter
+  - sound/packages/sound_flutter/example
   - microphone/packages/microphone_dart
+  - microphone/packages/microphone_flutter
+  - microphone/packages/microphone_flutter/example
   - packages/soundboard
+  - packages/soundboard_flutter
+  - apps/soundboard_example
+
+dependency_overrides:
+  # Keep sibling development hermetic; clones resolve the package from the
+  # ManyMath Git remote declared by packages/soundboard/pubspec.yaml.
+  mixer_dart:
+    path: ../../mixer/packages/mixer_dart
 
 dev_dependencies:
   melos: ^7.0.0
@@ -31,30 +39,46 @@ melos:
     analyze:
       description: Analyze all Dart packages.
       run: >-
-        dart analyze
-        sound/packages/sound_dart
-        microphone/packages/microphone_dart
-        packages/soundboard
+        dart analyze sound/packages/sound_dart &&
+        dart analyze microphone/packages/microphone_dart &&
+        dart analyze ../../mixer/packages/mixer_dart &&
+        dart analyze packages/soundboard &&
+        flutter analyze sound/packages/sound_flutter &&
+        flutter analyze microphone/packages/microphone_flutter &&
+        flutter analyze packages/soundboard_flutter &&
+        flutter analyze apps/soundboard_example
     format:
       description: Check Dart formatting.
       run: >-
         dart format --output none --set-exit-if-changed
         sound/packages/sound_dart
         microphone/packages/microphone_dart
+        sound/packages/sound_flutter/lib
+        microphone/packages/microphone_flutter/lib
+        ../../mixer/packages/mixer_dart
         packages/soundboard
+        packages/soundboard_flutter/lib
+        apps/soundboard_example/lib
     format:fix:
       description: Apply Dart formatting.
       run: >-
         dart format
         sound/packages/sound_dart
         microphone/packages/microphone_dart
+        sound/packages/sound_flutter/lib
+        microphone/packages/microphone_flutter/lib
+        ../../mixer/packages/mixer_dart
         packages/soundboard
+        packages/soundboard_flutter/lib
+        apps/soundboard_example/lib
     test:
       description: Run Dart tests.
       run: >-
         dart test sound/packages/sound_dart &&
         dart test microphone/packages/microphone_dart &&
-        dart test packages/soundboard
+        dart test ../../mixer/packages/mixer_dart &&
+        dart test packages/soundboard &&
+        flutter test packages/soundboard_flutter/test
     native:build:
       description: Build the vendored shared libraries (for CLI/dev use).
       run: >-

@@ -61,6 +61,75 @@ void main() {
     });
   });
 
+  group('playback routing and controls', () {
+    late SilentBackend sound;
+
+    setUp(() {
+      sound = SilentBackend(simulatedDuration: const Duration(seconds: 1));
+      Sound.registerBackend(sound, makeActive: true);
+    });
+
+    tearDown(Sound.reset);
+
+    test('speaker-only playback uses sound_dart and returns a voice', () async {
+      final board = Soundboard(format: _fmt);
+      addTearDown(board.dispose);
+      final clip = board.loadBytes(pcm16([100, 200]), format: _fmt);
+
+      final voice = await board.play(
+        clip,
+        outputs: const {SoundboardOutput.speakers},
+      );
+
+      expect(sound.loaded, hasLength(1));
+      expect(voice.isPlaying, isTrue);
+      await voice.pause();
+      expect(voice.isPlaying, isFalse);
+      await voice.seek(Duration.zero);
+      await voice.setGain(0.5);
+      await voice.setLooping(true);
+      await voice.resume();
+      expect(voice.isPlaying, isTrue);
+      await voice.stop();
+      expect(voice.isPlaying, isFalse);
+    });
+
+    test('microphone-only playback resamples onto the board clock', () async {
+      const source = CaptureFormat(sampleRate: 2, channels: 1);
+      const output = CaptureFormat(sampleRate: 4, channels: 1);
+      final board = Soundboard(
+        format: output,
+        chunk: const Duration(seconds: 1),
+      );
+      addTearDown(board.dispose);
+      final nextChunk = board.mixedFrames.first;
+
+      await board.play(
+        board.loadBytes(pcm16([0, 1000, 2000]), format: source),
+        outputs: const {SoundboardOutput.microphone},
+      );
+
+      expect(samples16(await nextChunk), [0, 500, 1000, 1500]);
+      expect(sound.loaded, isEmpty);
+    });
+
+    test('default routing sends one trigger to both destinations', () async {
+      final board = Soundboard(
+        format: _fmt,
+        chunk: const Duration(milliseconds: 20),
+      );
+      addTearDown(board.dispose);
+      final nextChunk = board.mixedFrames.first;
+
+      await board.play(
+        board.loadBytes(pcm16(List<int>.filled(160, 400)), format: _fmt),
+      );
+
+      expect(sound.loaded, hasLength(1));
+      expect(samples16(await nextChunk), List<int>.filled(160, 400));
+    });
+  });
+
   group('end-to-end mix (SilentBackend, no hardware)', () {
     /// Starts a soundboard recording fed by a controllable physical mic.
     Future<(Soundboard, StreamController<Uint8List>, Recording)> start() async {

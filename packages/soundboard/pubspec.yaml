@@ -5,7 +5,7 @@ description: >-
   dependencies.
 version: 0.0.1
 publish_to: none
-repository: https://github.com/ManyMath/soundboard
+repository: https://git.manymath.com/sneurlax/soundboard
 topics:
   - audio
   - microphone
@@ -21,6 +21,10 @@ dependencies:
   # For the macOS CoreAudio virtual-mic FFI (coreaudio.dart). Already in the
   # workspace via sound_dart, so this adds no new package to the project.
   ffi: ^2.1.0
+  mixer_dart:
+    git:
+      url: ssh://git@ssh.manymath.com:2222/sneurlax/mixer.git
+      path: packages/mixer_dart
   # Resolved to the vendored packages by the top-level pub workspace.
   microphone_dart: ^0.0.1
   sound_dart: ^0.0.1

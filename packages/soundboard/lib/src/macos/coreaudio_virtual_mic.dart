@@ -6,6 +6,8 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:microphone_dart/microphone_dart.dart' show CaptureFormat;
 
+import '../virtual_microphone.dart';
+
 /// Thrown when a CoreAudio virtual microphone cannot be created or operated.
 class CoreAudioException implements Exception {
   const CoreAudioException(this.message);
@@ -151,7 +153,7 @@ class _SinkBindings {
 /// // ... the app now hears the soundboard on the "BlackHole 2ch" mic ...
 /// await vmic.dispose();
 /// ```
-class CoreAudioVirtualMic {
+class CoreAudioVirtualMic implements VirtualMicrophone {
   CoreAudioVirtualMic._(
     this._bindings,
     this._sink,
@@ -164,9 +166,11 @@ class CoreAudioVirtualMic {
   static const String defaultDeviceName = 'BlackHole 2ch';
 
   /// The audio device apps select as their input.
+  @override
   final String deviceName;
 
   /// The format streamed into the device.
+  @override
   final CaptureFormat format;
 
   final _SinkBindings _bindings;
@@ -243,6 +247,7 @@ class CoreAudioVirtualMic {
   /// ```dart
   /// unawaited(vmic.feed(recording.frames));
   /// ```
+  @override
   Future<void> feed(Stream<Uint8List> pcm) {
     if (_disposed) throw const CoreAudioException('virtual mic disposed');
     if (_feeding) throw StateError('feed() already called');
@@ -306,6 +311,7 @@ class CoreAudioVirtualMic {
 
   /// Closes the sink and stops feeding. Idempotent. Completes a pending
   /// [feed] future.
+  @override
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;

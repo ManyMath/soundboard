@@ -24,6 +24,8 @@ export 'package:microphone_dart/microphone_dart.dart'
         RecordingState,
         SampleFormat,
         StreamCaptureBackend;
+export 'package:sound_dart/sound_dart.dart' show SoundSource;
 
 export 'src/clip.dart';
 export 'src/soundboard.dart';
+export 'src/virtual_microphone.dart';

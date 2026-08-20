@@ -4,6 +4,8 @@ import 'dart:typed_data';
 
 import 'package:microphone_dart/microphone_dart.dart' show CaptureFormat;
 
+import '../virtual_microphone.dart';
+
 /// Thrown when a PipeWire virtual microphone cannot be created or operated.
 class PipeWireException implements Exception {
   const PipeWireException(this.message);
@@ -85,7 +87,7 @@ class PipeWireCommands {
 /// // ... the app now hears the soundboard on the "Soundboard" mic ...
 /// await vmic.dispose();
 /// ```
-class PipeWireVirtualMic {
+class PipeWireVirtualMic implements VirtualMicrophone {
   PipeWireVirtualMic._(
     this._loopback,
     this.sinkNodeName,
@@ -99,7 +101,11 @@ class PipeWireVirtualMic {
   /// The human-readable name apps show in their input menu.
   final String name;
 
+  @override
+  String get deviceName => name;
+
   /// The format streamed into the device.
+  @override
   final CaptureFormat format;
 
   /// The PipeWire `node.name` of the virtual source (the microphone).
@@ -174,6 +180,7 @@ class PipeWireVirtualMic {
   /// ```dart
   /// unawaited(vmic.feed(recording.frames));
   /// ```
+  @override
   Future<void> feed(Stream<Uint8List> pcm) async {
     if (_disposed) throw const PipeWireException('virtual mic disposed');
     if (_feeder != null) throw StateError('feed() already called');
@@ -214,6 +221,7 @@ class PipeWireVirtualMic {
 
   /// Removes the virtual microphone by stopping its processes. Idempotent.
   /// Completes a pending [feed] future.
+  @override
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;

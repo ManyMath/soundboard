@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:microphone_dart/microphone_dart.dart' show CaptureFormat;
+import 'package:mixer_dart/mixer_dart.dart' show PcmClip, PcmFormat;
 
 /// A decoded audio clip held in memory, ready to be mixed into a soundboard.
 ///
@@ -13,7 +14,11 @@ class Clip {
     required this.sampleRate,
     required this.channels,
   }) : assert(sampleRate > 0, 'sampleRate must be positive'),
-       assert(channels > 0, 'channels must be positive');
+       assert(channels > 0, 'channels must be positive'),
+       assert(
+         samples.length % channels == 0,
+         'samples must contain complete interleaved frames',
+       );
 
   /// Interleaved S16LE samples.
   final Int16List samples;
@@ -35,6 +40,12 @@ class Clip {
   /// The clip's format expressed as a [CaptureFormat].
   CaptureFormat get format =>
       CaptureFormat(sampleRate: sampleRate, channels: channels);
+
+  /// This clip as the device-independent type consumed by `mixer_dart`.
+  PcmClip get pcmClip => PcmClip(
+    samples: samples,
+    format: PcmFormat(sampleRate: sampleRate, channels: channels),
+  );
 
   /// Wraps raw interleaved S16LE [pcm] described by [format].
   ///
