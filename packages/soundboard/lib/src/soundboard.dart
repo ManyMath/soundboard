@@ -172,7 +172,8 @@ class Soundboard {
     final voices = List<SoundboardVoice>.of(_voices);
     _mixer.stopAll();
     await Future.wait(voices.map((voice) => voice.stop()));
-    _voices.clear();
+    // Voices started while awaiting the stops are not ours to drop.
+    _voices.removeAll(voices);
   }
 
   /// A capture backend yielding the physical microphone plus [mixedFrames].
@@ -200,9 +201,12 @@ class Soundboard {
     if (_disposed) return;
     _disposed = true;
     final voices = List<SoundboardVoice>.of(_voices);
-    await Future.wait(voices.map((voice) => voice.dispose()));
-    _voices.clear();
-    await _mixer.dispose();
+    try {
+      await Future.wait(voices.map((voice) => voice.dispose()));
+    } finally {
+      _voices.clear();
+      await _mixer.dispose();
+    }
   }
 }
 
@@ -294,16 +298,22 @@ final class SoundboardVoice {
     if (_stopped || _disposed) return;
     _stopped = true;
     _mixerVoice?.stop();
-    await _speakerPlayback?.stop();
-    _board._voices.remove(this);
+    try {
+      await _speakerPlayback?.stop();
+    } finally {
+      _board._voices.remove(this);
+    }
   }
 
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
     _mixerVoice?.dispose();
-    await _speakerPlayback?.dispose();
-    _board._voices.remove(this);
+    try {
+      await _speakerPlayback?.dispose();
+    } finally {
+      _board._voices.remove(this);
+    }
   }
 
   Future<void> _applySpeakerVolume() async {

@@ -173,6 +173,29 @@ void main() {
     });
   });
 
+  test('a voice started during stopAll() stays tracked', () async {
+    final stopGate = Completer<void>();
+    final sound = _GatedSilentBackend(
+      Future<void>.value(),
+      stopGate: stopGate.future,
+    );
+    Sound.registerBackend(sound, makeActive: true);
+    addTearDown(Sound.reset);
+    final board = Soundboard(format: _fmt);
+    final clip = board.loadBytes(pcm16([1, 2]), format: _fmt);
+    const speakers = {SoundboardOutput.speakers};
+
+    await board.play(clip, outputs: speakers);
+    final stopping = board.stopAll(); // waits on the slow speaker stop
+    final voice = await board.play(clip, outputs: speakers);
+    stopGate.complete();
+    await stopping;
+    expect(voice.isPlaying, isTrue);
+
+    await board.dispose();
+    expect(sound.playbacks.last.state, PlaybackState.disposed);
+  });
+
   test('a speaker route error reaches onComplete, not the zone', () async {
     final failure = Completer<void>();
     Sound.registerBackend(
@@ -414,10 +437,13 @@ void main() {
 
 /// A silent backend whose load() waits for [_gate], like a slow decode.
 class _GatedSilentBackend extends SilentBackend {
-  _GatedSilentBackend(this._gate)
+  _GatedSilentBackend(this._gate, {this.stopGate})
     : super(simulatedDuration: const Duration(seconds: 1));
 
   final Future<void> _gate;
+
+  /// When set, each playback's stop() waits for it.
+  final Future<void>? stopGate;
   final List<Playback> playbacks = [];
 
   @override
@@ -427,7 +453,10 @@ class _GatedSilentBackend extends SilentBackend {
     bool loop = false,
   }) async {
     await _gate;
-    final playback = await super.load(source, volume: volume, loop: loop);
+    final playback = switch (stopGate) {
+      final gate? => _SlowStopPlayback(gate),
+      null => await super.load(source, volume: volume, loop: loop),
+    };
     playbacks.add(playback);
     return playback;
   }
@@ -456,4 +485,16 @@ class _FailingPlayback extends SilentPlayback {
 
   @override
   Future<void> get onComplete => _failure;
+}
+
+class _SlowStopPlayback extends SilentPlayback {
+  _SlowStopPlayback(this._stopGate) : super(const Duration(seconds: 1));
+
+  final Future<void> _stopGate;
+
+  @override
+  Future<void> stop() async {
+    await _stopGate;
+    await super.stop();
+  }
 }
