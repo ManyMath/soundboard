@@ -158,7 +158,8 @@ class Soundboard {
       looping: looping,
     );
     _voices.add(voice);
-    unawaited(voice.onComplete.then((_) => _voices.remove(voice)));
+    // Route errors belong to whoever awaits voice.onComplete, not the zone.
+    voice.onComplete.whenComplete(() => _voices.remove(voice)).ignore();
     if (speakerPlayback != null && _masterVolume != masterAtStart) {
       await voice._applySpeakerVolume();
     }

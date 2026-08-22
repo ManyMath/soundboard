@@ -3,7 +3,13 @@ import 'dart:typed_data';
 
 import 'package:soundboard/soundboard.dart';
 import 'package:sound_dart/sound_dart.dart'
-    show Playback, PlaybackState, SilentBackend, Sound, SoundSource;
+    show
+        Playback,
+        PlaybackState,
+        SilentBackend,
+        SilentPlayback,
+        Sound,
+        SoundSource;
 import 'package:test/test.dart';
 
 /// Builds interleaved S16LE bytes from signed sample values.
@@ -165,6 +171,25 @@ void main() {
       expect((await pending).isPlaying, isFalse);
       expect(sound.playbacks.single.state, PlaybackState.disposed);
     });
+  });
+
+  test('a speaker route error reaches onComplete, not the zone', () async {
+    final failure = Completer<void>();
+    Sound.registerBackend(
+      _FailingSilentBackend(failure.future),
+      makeActive: true,
+    );
+    addTearDown(Sound.reset);
+    final board = Soundboard(format: _fmt);
+    addTearDown(board.dispose);
+    final voice = await board.play(
+      board.loadBytes(pcm16([1, 2]), format: _fmt),
+      outputs: const {SoundboardOutput.speakers},
+    );
+
+    final completion = expectLater(voice.onComplete, throwsStateError);
+    failure.completeError(StateError('native voice error'));
+    await completion;
   });
 
   group('end-to-end mix (SilentBackend, no hardware)', () {
@@ -406,4 +431,29 @@ class _GatedSilentBackend extends SilentBackend {
     playbacks.add(playback);
     return playback;
   }
+}
+
+/// A silent backend whose playbacks fail with [_failure], like a native voice
+/// error.
+class _FailingSilentBackend extends SilentBackend {
+  _FailingSilentBackend(this._failure)
+    : super(simulatedDuration: const Duration(seconds: 1));
+
+  final Future<void> _failure;
+
+  @override
+  Future<Playback> load(
+    SoundSource source, {
+    double volume = 1.0,
+    bool loop = false,
+  }) async => _FailingPlayback(_failure);
+}
+
+class _FailingPlayback extends SilentPlayback {
+  _FailingPlayback(this._failure) : super(const Duration(seconds: 1));
+
+  final Future<void> _failure;
+
+  @override
+  Future<void> get onComplete => _failure;
 }
