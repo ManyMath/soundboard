@@ -223,7 +223,15 @@ final class SoundboardVoice {
        _speakerPlayback = speakerPlayback,
        _gain = gain,
        _looping = looping,
-       _inactive = false;
+       _inactive = false {
+    Future.wait<void>(<Future<void>>[
+      if (mixerVoice case final mixer?) mixer.onComplete,
+      if (speakerPlayback case final speaker?) speaker.onComplete,
+    ]).then<void>(
+      (_) => _settle(),
+      onError: (Object error, StackTrace stack) => _settle(error, stack),
+    );
+  }
 
   SoundboardVoice._inactive(this._board, this.clip)
     : _mixerVoice = null,
@@ -241,6 +249,7 @@ final class SoundboardVoice {
   bool _looping;
   bool _stopped = false;
   bool _disposed = false;
+  final Completer<void> _completion = Completer<void>();
 
   double get gain => _gain;
   bool get looping => _looping;
@@ -255,14 +264,10 @@ final class SoundboardVoice {
       _speakerPlayback?.position ?? _mixerVoice?.position ?? Duration.zero;
   Duration get duration => clip.duration;
 
-  /// Completes once every selected route reaches the end naturally.
-  Future<void> get onComplete {
-    if (_inactive) return Future<void>.value();
-    return Future.wait<void>(<Future<void>>[
-      if (_mixerVoice case final mixer?) mixer.onComplete,
-      if (_speakerPlayback case final speaker?) speaker.onComplete,
-    ]);
-  }
+  /// Completes once every selected route reaches the end naturally, or when
+  /// the voice is disposed. A stopped voice does not complete.
+  Future<void> get onComplete =>
+      _inactive ? Future<void>.value() : _completion.future;
 
   Future<void> setGain(double gain) async {
     if (!gain.isFinite || gain < 0) {
@@ -299,7 +304,8 @@ final class SoundboardVoice {
     _stopped = true;
     _mixerVoice?.stop();
     try {
-      await _speakerPlayback?.stop();
+      // Stopping is final, so release the speaker's native voice as well.
+      await _speakerPlayback?.dispose();
     } finally {
       _board._voices.remove(this);
     }
@@ -314,6 +320,18 @@ final class SoundboardVoice {
     } finally {
       _board._voices.remove(this);
     }
+  }
+
+  void _settle([Object? error, StackTrace? stack]) {
+    if (_completion.isCompleted || (_stopped && !_disposed)) return;
+    if (error == null) {
+      _completion.complete();
+    } else {
+      _completion.completeError(error, stack);
+    }
+    // Playback handles hold a native voice until disposed; release it now
+    // instead of whenever (if ever) the app disposes this voice.
+    unawaited(_speakerPlayback?.dispose());
   }
 
   Future<void> _applySpeakerVolume() async {
