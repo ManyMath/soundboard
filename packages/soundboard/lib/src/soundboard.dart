@@ -47,6 +47,7 @@ class Soundboard {
   final PcmMixer _mixer;
   final Set<SoundboardVoice> _voices = <SoundboardVoice>{};
   bool _disposed = false;
+  int _stopGeneration = 0;
   double _masterVolume = 1;
 
   /// Linear gain applied to all soundboard clips on every destination.
@@ -119,6 +120,8 @@ class Soundboard {
       throw ArgumentError.value(outputs, 'outputs', 'must not be empty');
     }
 
+    final generation = _stopGeneration;
+    final masterAtStart = _masterVolume;
     MixerVoice? mixerVoice;
     Playback? speakerPlayback;
     try {
@@ -139,6 +142,13 @@ class Soundboard {
       rethrow;
     }
 
+    // dispose() or stopAll() ran while the speaker route was starting.
+    if (_disposed || generation != _stopGeneration) {
+      mixerVoice?.stop();
+      await speakerPlayback?.dispose();
+      return SoundboardVoice._inactive(this, clip);
+    }
+
     final voice = SoundboardVoice._(
       this,
       clip,
@@ -149,11 +159,15 @@ class Soundboard {
     );
     _voices.add(voice);
     unawaited(voice.onComplete.then((_) => _voices.remove(voice)));
+    if (speakerPlayback != null && _masterVolume != masterAtStart) {
+      await voice._applySpeakerVolume();
+    }
     return voice;
   }
 
   /// Stops every active voice. The physical microphone is unaffected.
   Future<void> stopAll() async {
+    _stopGeneration++;
     final voices = List<SoundboardVoice>.of(_voices);
     _mixer.stopAll();
     await Future.wait(voices.map((voice) => voice.stop()));

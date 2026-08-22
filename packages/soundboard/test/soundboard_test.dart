@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:soundboard/soundboard.dart';
-import 'package:sound_dart/sound_dart.dart' show Sound, SilentBackend;
+import 'package:sound_dart/sound_dart.dart'
+    show Playback, PlaybackState, SilentBackend, Sound, SoundSource;
 import 'package:test/test.dart';
 
 /// Builds interleaved S16LE bytes from signed sample values.
@@ -127,6 +128,42 @@ void main() {
 
       expect(sound.loaded, hasLength(1));
       expect(samples16(await nextChunk), List<int>.filled(160, 400));
+    });
+  });
+
+  group('lifecycle races', () {
+    tearDown(Sound.reset);
+
+    test('dispose() during an in-flight play() releases the speaker', () async {
+      final gate = Completer<void>();
+      final sound = _GatedSilentBackend(gate.future);
+      Sound.registerBackend(sound, makeActive: true);
+      final board = Soundboard(format: _fmt);
+      final clip = board.loadBytes(pcm16(List.filled(160, 1000)), format: _fmt);
+
+      final pending = board.play(clip, looping: true);
+      await board.dispose();
+      gate.complete();
+      final voice = await pending;
+
+      expect(voice.isPlaying, isFalse);
+      expect(sound.playbacks.single.state, PlaybackState.disposed);
+    });
+
+    test('stopAll() during an in-flight play() cancels it', () async {
+      final gate = Completer<void>();
+      final sound = _GatedSilentBackend(gate.future);
+      Sound.registerBackend(sound, makeActive: true);
+      final board = Soundboard(format: _fmt);
+      addTearDown(board.dispose);
+      final clip = board.loadBytes(pcm16(List.filled(160, 1000)), format: _fmt);
+
+      final pending = board.play(clip, looping: true);
+      await board.stopAll();
+      gate.complete();
+
+      expect((await pending).isPlaying, isFalse);
+      expect(sound.playbacks.single.state, PlaybackState.disposed);
     });
   });
 
@@ -348,4 +385,25 @@ void main() {
       await board.dispose();
     });
   });
+}
+
+/// A silent backend whose load() waits for [_gate], like a slow decode.
+class _GatedSilentBackend extends SilentBackend {
+  _GatedSilentBackend(this._gate)
+    : super(simulatedDuration: const Duration(seconds: 1));
+
+  final Future<void> _gate;
+  final List<Playback> playbacks = [];
+
+  @override
+  Future<Playback> load(
+    SoundSource source, {
+    double volume = 1.0,
+    bool loop = false,
+  }) async {
+    await _gate;
+    final playback = await super.load(source, volume: volume, loop: loop);
+    playbacks.add(playback);
+    return playback;
+  }
 }
