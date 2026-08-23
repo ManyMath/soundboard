@@ -66,6 +66,18 @@ void main() {
       expect(clip.frameCount, 800); // 0.1 s at 8 kHz
       expect(clip.samples.every((v) => v == 0), isTrue);
     });
+
+    test('loadFile fails loudly when nothing can decode', () async {
+      // The silent fallback that stands in for a missing decoder.
+      Sound.registerBackend(SilentBackend(), makeActive: true);
+      addTearDown(Sound.reset);
+      final board = Soundboard(format: _fmt);
+
+      await expectLater(
+        board.loadFile('whatever.wav'),
+        throwsA(isA<UnsupportedSourceException>()),
+      );
+    });
   });
 
   group('playback routing and controls', () {

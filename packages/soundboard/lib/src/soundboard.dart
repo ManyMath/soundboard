@@ -81,6 +81,14 @@ class Soundboard {
   Future<Clip> load(SoundSource source) async {
     final stream = await Sound.openPcmStream(source);
     try {
+      // Without a decoding PCM tap (no native library, or the web) sound_dart
+      // falls back to the silent backend, which yields zero frames.
+      if (stream.frameCount == 0) {
+        throw const UnsupportedSourceException(
+          'decoded no audio: the source is empty or no decoding sound '
+          'backend is available',
+        );
+      }
       return Clip(
         samples: stream.buffer,
         sampleRate: stream.sampleRate,
