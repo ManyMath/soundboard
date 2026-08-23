@@ -373,6 +373,16 @@ class _GainCaptureBackend extends CaptureBackend {
       deviceId: deviceId,
       retainPcm: retainPcm,
     );
+    // The mix sums raw bytes, so a mic that fell back to another rate or
+    // layout (the web always captures mono at the AudioContext rate) would be
+    // mixed against the clip bus at the wrong speed and mislabelled.
+    if (inner.format != _format) {
+      await inner.dispose();
+      throw CaptureException(
+        'the microphone delivers ${inner.format}, but the soundboard mixes '
+        '$_format; construct the Soundboard with the microphone\'s format',
+      );
+    }
     return _GainRecording(inner, _gain);
   }
 

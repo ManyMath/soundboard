@@ -347,6 +347,22 @@ void main() {
       await board.dispose();
     });
 
+    test('rejects a mic that delivers a different format', () async {
+      final board = Soundboard(format: _fmt);
+      addTearDown(board.dispose);
+      final micCtrl = StreamController<Uint8List>();
+      addTearDown(micCtrl.close);
+      final mic = StreamCaptureBackend(
+        source: micCtrl.stream,
+        format: const CaptureFormat(sampleRate: 48000, channels: 1),
+      );
+
+      await expectLater(
+        board.asMicrophoneBackend(physicalMic: mic).startRecording(),
+        throwsA(isA<CaptureException>()),
+      );
+    });
+
     test('with no clips the mic passes through unchanged', () async {
       final (board, micCtrl, rec) = await start();
       micCtrl.add(pcm16([10, 20, 30, 40]));
