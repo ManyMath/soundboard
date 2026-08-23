@@ -435,8 +435,8 @@ class _GainRecording implements Recording {
     final output = ByteData.sublistView(out);
     for (var i = 0; i < chunk.length ~/ 2; i++) {
       final sample = (input.getInt16(i * 2, Endian.little) * gain)
-          .round()
-          .clamp(-32768, 32767);
+          .clamp(-32768.0, 32767.0)
+          .round();
       output.setInt16(i * 2, sample, Endian.little);
     }
     return out;

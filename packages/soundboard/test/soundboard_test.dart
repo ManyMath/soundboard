@@ -325,6 +325,18 @@ void main() {
       await board.dispose();
     });
 
+    test('an extreme micVolume clamps instead of failing', () async {
+      final (board, micCtrl, rec) = await start();
+      board.micVolume = double.maxFinite;
+      micCtrl.add(pcm16([1000, -1000]));
+      await pump();
+
+      expect(samples16(rec.pcm), [32767, -32768]);
+      await rec.stop();
+      await micCtrl.close();
+      await board.dispose();
+    });
+
     test(
       'a clip shorter than the mic mixes only where it has samples',
       () async {
