@@ -263,6 +263,11 @@ void main() {
   });
 
   group('end-to-end mix (SilentBackend, no hardware)', () {
+    // play() also routes to the speakers by default; keep those silent even
+    // where the native sound library is built.
+    setUp(() => Sound.registerBackend(SilentBackend(), makeActive: true));
+    tearDown(Sound.reset);
+
     /// Starts a soundboard recording fed by a controllable physical mic.
     Future<(Soundboard, StreamController<Uint8List>, Recording)> start() async {
       final board = Soundboard(
