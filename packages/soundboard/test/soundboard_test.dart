@@ -114,8 +114,8 @@ void main() {
     });
 
     test('microphone-only playback resamples onto the board clock', () async {
-      const source = CaptureFormat(sampleRate: 2, channels: 1);
-      const output = CaptureFormat(sampleRate: 4, channels: 1);
+      const source = CaptureFormat(sampleRate: 4000, channels: 1);
+      const output = CaptureFormat(sampleRate: 8000, channels: 1);
       final board = Soundboard(
         format: output,
         chunk: const Duration(seconds: 1),
@@ -123,12 +123,16 @@ void main() {
       addTearDown(board.dispose);
       final nextChunk = board.mixedFrames.first;
 
+      // A tenth of a second at 4 kHz spans 800 frames at 8 kHz.
       await board.play(
-        board.loadBytes(pcm16([0, 1000, 2000]), format: source),
+        board.loadBytes(pcm16(List.filled(400, 1000)), format: source),
         outputs: const {SoundboardOutput.microphone},
       );
 
-      expect(samples16(await nextChunk), [0, 500, 1000, 1500]);
+      final out = samples16(await nextChunk);
+      expect(out, hasLength(8000));
+      expect(out.sublist(50, 750), everyElement(1000)); // clear of the edges
+      expect(out.sublist(800), everyElement(0));
       expect(sound.loaded, isEmpty);
     });
 
