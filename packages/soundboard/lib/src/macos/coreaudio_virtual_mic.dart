@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:microphone_dart/microphone_dart.dart' show CaptureFormat;
 
+import '../s16le.dart';
 import '../virtual_microphone.dart';
 
 /// Thrown when a CoreAudio virtual microphone cannot be created or operated.
@@ -273,21 +274,11 @@ class CoreAudioVirtualMic implements VirtualMicrophone {
 
   void _writeChunk(Uint8List chunk) {
     if (_disposed || _sink == nullptr) return;
-    final samples = chunk.length ~/ 2;
-    if (samples == 0) return;
-    final buf = _ensureScratch(samples);
-    final dst = buf.asTypedList(samples);
-    if (Endian.host == Endian.little && chunk.offsetInBytes.isEven) {
-      // S16LE bytes -> Int16 is a straight reinterpret on little-endian hosts
-      // (all Apple silicon and Intel Macs).
-      dst.setRange(0, samples, Int16List.sublistView(chunk, 0, samples));
-    } else {
-      final view = ByteData.sublistView(chunk);
-      for (var i = 0; i < samples; i++) {
-        dst[i] = view.getInt16(i * 2, Endian.little);
-      }
-    }
-    final n = _bindings.write(_sink, buf, samples);
+    final samples = s16leSamples(chunk);
+    if (samples.isEmpty) return;
+    final buf = _ensureScratch(samples.length);
+    buf.asTypedList(samples.length).setAll(0, samples);
+    final n = _bindings.write(_sink, buf, samples.length);
     if (n < 0) {
       // A write failure (e.g. the device went away) ends feeding; capture the
       // error synchronously (the native slot is thread-local), surface it on

@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:microphone_dart/microphone_dart.dart' show CaptureFormat;
 
+import '../s16le.dart';
 import '../virtual_microphone.dart';
 
 /// A Windows virtual-cable operation failed.
@@ -224,19 +225,11 @@ class WindowsVirtualMic implements VirtualMicrophone {
 
   void _writeChunk(Uint8List chunk) {
     if (_disposed || _sink == nullptr) return;
-    final samples = chunk.length ~/ 2;
-    if (samples == 0) return;
-    final buffer = _ensureScratch(samples);
-    final target = buffer.asTypedList(samples);
-    if (Endian.host == Endian.little && chunk.offsetInBytes.isEven) {
-      target.setRange(0, samples, Int16List.sublistView(chunk, 0, samples));
-    } else {
-      final view = ByteData.sublistView(chunk);
-      for (var i = 0; i < samples; i++) {
-        target[i] = view.getInt16(i * 2, Endian.little);
-      }
-    }
-    if (_bindings.write(_sink, buffer, samples) < 0) {
+    final samples = s16leSamples(chunk);
+    if (samples.isEmpty) return;
+    final buffer = _ensureScratch(samples.length);
+    buffer.asTypedList(samples.length).setAll(0, samples);
+    if (_bindings.write(_sink, buffer, samples.length) < 0) {
       final error = WindowsVirtualMicException(
         'writing to "$sinkDeviceName" failed: ${_bindings.lastErrorString()}',
       );
