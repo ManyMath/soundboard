@@ -75,6 +75,10 @@ class Soundboard {
   }
 
   /// The mixed clip bus, as interleaved S16LE frames in [format].
+  ///
+  /// It runs on a timer, except while a recording from [asMicrophoneBackend]
+  /// is capturing: the microphone's clock drives it then, and the chunks
+  /// arrive at that pace and in the microphone's chunk sizes.
   Stream<Uint8List> get mixedFrames => _mixer.frames;
 
   /// Loads and decodes any `sound_dart` [SoundSource].
@@ -186,20 +190,22 @@ class Soundboard {
 
   /// A capture backend yielding the physical microphone plus [mixedFrames].
   ///
+  /// The clip bus follows the microphone's clock while a recording runs:
+  /// every captured chunk advances the clips by exactly its own length, so a
+  /// long session neither builds latency nor drops clip audio when the device
+  /// clock and the system timer disagree.
+  ///
   /// Resolve [physicalMic] before registering the result as the active global
   /// backend, or the soundboard would feed itself. For an open-ended session,
   /// use `retainPcm: false` when starting the returned backend.
   CaptureBackend asMicrophoneBackend({CaptureBackend? physicalMic}) {
-    final mic = _GainCaptureBackend(
-      physicalMic ?? Microphone.backend,
-      () => micVolume,
-      format,
-    );
-    final clips = StreamCaptureBackend(source: mixedFrames, format: format);
+    // A mixing backend with one source supplies the Recording plumbing
+    // (retained PCM, WAV output, pause state) around the board's microphone.
     return MixingCaptureBackend(
-      <CaptureBackend>[mic, clips],
+      <CaptureBackend>[
+        _BoardMicBackend(this, physicalMic ?? Microphone.backend),
+      ],
       format: format,
-      primary: 0,
       ownsSources: false,
     );
   }
@@ -347,16 +353,15 @@ final class SoundboardVoice {
   }
 }
 
-/// Applies a live gain to a capture backend's streamed frames.
-class _GainCaptureBackend extends CaptureBackend {
-  _GainCaptureBackend(this._inner, this._gain, this._format);
+/// The physical microphone with live gain and the board's clip bus mixed in.
+class _BoardMicBackend extends CaptureBackend {
+  _BoardMicBackend(this._board, this._inner);
 
+  final Soundboard _board;
   final CaptureBackend _inner;
-  final double Function() _gain;
-  final CaptureFormat _format;
 
   @override
-  String get name => 'gain(${_inner.name})';
+  String get name => 'soundboard(${_inner.name})';
   @override
   int get priority => _inner.priority;
   @override
@@ -376,33 +381,58 @@ class _GainCaptureBackend extends CaptureBackend {
     String? deviceId,
     bool retainPcm = true,
   }) async {
+    final board = _board.format;
     final inner = await _inner.startRecording(
-      format: _format,
+      format: board,
       deviceId: deviceId,
       retainPcm: retainPcm,
     );
     // The mix sums raw bytes, so a mic that fell back to another rate or
     // layout (the web always captures mono at the AudioContext rate) would be
     // mixed against the clip bus at the wrong speed and mislabelled.
-    if (inner.format != _format) {
+    if (inner.format != board) {
       await inner.dispose();
       throw CaptureException(
         'the microphone delivers ${inner.format}, but the soundboard mixes '
-        '$_format; construct the Soundboard with the microphone\'s format',
+        '$board; construct the Soundboard with the microphone\'s format',
       );
     }
-    return _GainRecording(inner, _gain);
+    return _BoardMicRecording(_board, inner);
   }
 
   @override
   Future<void> dispose() => _inner.dispose();
 }
 
-class _GainRecording implements Recording {
-  _GainRecording(this._inner, this._gain);
+/// A microphone recording with the clip bus summed into every chunk.
+///
+/// Each captured chunk pulls exactly its own length from the clip bus, so the
+/// clips run on the microphone's clock and the two cannot drift apart.
+class _BoardMicRecording implements Recording {
+  _BoardMicRecording(this._board, this._inner)
+    : _bytesPerFrame = _board.format.bytesPerFrame {
+    _frames = StreamController<Uint8List>.broadcast(
+      sync: true,
+      onListen: () => _subscription ??= _inner.frames.listen(
+        _onChunk,
+        onError: _frames.addError,
+        onDone: () {
+          // A microphone that ends on its own must not keep the bus frozen.
+          _tap.stop();
+          _frames.close();
+        },
+      ),
+    );
+    _tap.start();
+  }
 
+  final Soundboard _board;
   final Recording _inner;
-  final double Function() _gain;
+  final int _bytesPerFrame;
+  late final StreamController<Uint8List> _frames;
+  late final _ClipTap _tap = _ClipTap(_board);
+  StreamSubscription<Uint8List>? _subscription;
+  Uint8List _carry = Uint8List(0);
 
   @override
   RecordingState get state => _inner.state;
@@ -411,34 +441,124 @@ class _GainRecording implements Recording {
   @override
   CaptureFormat get format => _inner.format;
   @override
-  Stream<Uint8List> get frames => _inner.frames.map(_scale);
+  Stream<Uint8List> get frames => _frames.stream;
   @override
   Uint8List get pcm => _inner.pcm;
   @override
   Duration get duration => _inner.duration;
-  @override
-  Future<void> pause() => _inner.pause();
-  @override
-  Future<void> resume() => _inner.resume();
-  @override
-  Future<Uint8List> stop() => _inner.stop();
-  @override
-  Future<String> stopToFile(String path) => _inner.stopToFile(path);
-  @override
-  Future<void> dispose() => _inner.dispose();
 
-  Uint8List _scale(Uint8List chunk) {
-    final gain = _gain();
-    if (gain == 1) return chunk;
-    final out = Uint8List(chunk.length);
-    final input = ByteData.sublistView(chunk);
-    final output = ByteData.sublistView(out);
-    for (var i = 0; i < chunk.length ~/ 2; i++) {
-      final sample = (input.getInt16(i * 2, Endian.little) * gain)
-          .clamp(-32768.0, 32767.0)
-          .round();
-      output.setInt16(i * 2, sample, Endian.little);
+  // While paused the microphone delivers nothing to clock the bus by, so
+  // hand it back to the mixer's timer; the clips keep real time meanwhile.
+  @override
+  Future<void> pause() async {
+    _tap.stop();
+    await _inner.pause();
+  }
+
+  @override
+  Future<void> resume() async {
+    await _inner.resume();
+    _tap.start();
+  }
+
+  @override
+  Future<Uint8List> stop() async {
+    try {
+      return await _inner.stop();
+    } finally {
+      _tap.stop();
     }
+  }
+
+  @override
+  Future<String> stopToFile(String path) async {
+    try {
+      return await _inner.stopToFile(path);
+    } finally {
+      _tap.stop();
+    }
+  }
+
+  @override
+  Future<void> dispose() async {
+    _tap.stop();
+    await _subscription?.cancel();
+    _subscription = null;
+    await _inner.dispose();
+    if (!_frames.isClosed) await _frames.close();
+  }
+
+  void _onChunk(Uint8List chunk) {
+    // Only whole frames line clip samples up with the right channels.
+    var bytes = chunk;
+    if (_carry.isNotEmpty) {
+      bytes = Uint8List(_carry.length + chunk.length)
+        ..setAll(0, _carry)
+        ..setAll(_carry.length, chunk);
+    }
+    final whole = bytes.length - bytes.length % _bytesPerFrame;
+    _carry = Uint8List.fromList(Uint8List.sublistView(bytes, whole));
+    if (whole == 0) return;
+
+    final clip = ByteData.sublistView(_tap.take(whole ~/ _bytesPerFrame));
+    final mic = ByteData.sublistView(bytes, 0, whole);
+    final out = Uint8List(whole);
+    final view = ByteData.sublistView(out);
+    final gain = _board.micVolume;
+    for (var i = 0; i < whole; i += 2) {
+      final sum =
+          mic.getInt16(i, Endian.little) * gain +
+          clip.getInt16(i, Endian.little);
+      view.setInt16(i, sum.clamp(-32768.0, 32767.0).round(), Endian.little);
+    }
+    _frames.add(out);
+  }
+}
+
+/// One microphone recording's view of the board's clip bus.
+///
+/// The first recording takes the mixer's clock and pulls exactly the frames
+/// each microphone chunk needs. A recording that finds the clock taken (two
+/// recordings at once) listens to the bus instead and buffers what the
+/// clocking recording pulls.
+class _ClipTap {
+  _ClipTap(this._board);
+
+  final Soundboard _board;
+  MixerClock? _clock;
+  StreamSubscription<Uint8List>? _subscription;
+  final BytesBuilder _buffer = BytesBuilder(copy: false);
+
+  void start() {
+    if (_clock != null || _subscription != null || _board._disposed) return;
+    _clock = _board._mixer.attachClock();
+    if (_clock == null) {
+      _subscription = _board.mixedFrames.listen(_buffer.add);
+    }
+  }
+
+  /// The next [frames] of the clip bus, silence where it has none.
+  Uint8List take(int frames) {
+    final clock = _clock;
+    if (clock != null) return clock.pull(frames);
+    final wanted = frames * _board.format.bytesPerFrame;
+    final out = Uint8List(wanted);
+    if (_buffer.isEmpty) return out;
+    final all = _buffer.takeBytes();
+    // Never let a follower fall more than a second behind the clocking mic.
+    final keep = _board.format.bytesPerSecond;
+    final start = all.length > keep + wanted ? all.length - keep - wanted : 0;
+    final end = start + wanted < all.length ? start + wanted : all.length;
+    out.setRange(0, end - start, all, start);
+    if (end < all.length) _buffer.add(Uint8List.sublistView(all, end));
     return out;
+  }
+
+  void stop() {
+    _clock?.detach();
+    _clock = null;
+    unawaited(_subscription?.cancel());
+    _subscription = null;
+    _buffer.clear();
   }
 }

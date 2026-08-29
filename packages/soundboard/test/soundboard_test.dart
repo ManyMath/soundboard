@@ -376,6 +376,117 @@ void main() {
       await board.dispose();
     });
 
+    test('clips advance with captured audio, not the wall clock', () async {
+      final (board, micCtrl, rec) = await start();
+      final voice = await board.play(
+        board.loadBytes(pcm16(List.filled(480, 1000)), format: _fmt),
+        outputs: const {SoundboardOutput.microphone},
+      );
+      // Several clip-lengths of wall-clock time, but no captured audio.
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      expect(voice.position, Duration.zero);
+
+      micCtrl.add(pcm16(List.filled(160, 500)));
+      await pump();
+      expect(voice.position, const Duration(milliseconds: 20));
+      expect(samples16(rec.pcm), List.filled(160, 1500));
+      await rec.stop();
+      await micCtrl.close();
+      await board.dispose();
+    });
+
+    test('a mic chunk split mid-frame keeps clips on their channels', () async {
+      const stereo = CaptureFormat(sampleRate: 8000, channels: 2);
+      final board = Soundboard(format: stereo);
+      final micCtrl = StreamController<Uint8List>();
+      final rec = await board
+          .asMicrophoneBackend(
+            physicalMic: StreamCaptureBackend(
+              source: micCtrl.stream,
+              format: stereo,
+            ),
+          )
+          .startRecording(format: stereo);
+      await board.play(
+        board.loadBytes(
+          pcm16([
+            for (var i = 0; i < 160; i++) ...[1000, 2000],
+          ]),
+          format: stereo,
+        ),
+        outputs: const {SoundboardOutput.microphone},
+      );
+
+      final silence = Uint8List(160 * 4);
+      micCtrl
+        ..add(Uint8List.sublistView(silence, 0, 3))
+        ..add(Uint8List.sublistView(silence, 3));
+      await pump();
+
+      expect(samples16(rec.pcm), [
+        for (var i = 0; i < 160; i++) ...[1000, 2000],
+      ]);
+      await rec.stop();
+      await micCtrl.close();
+      await board.dispose();
+    });
+
+    test('a second recording hears the clips the first one clocks', () async {
+      final board = Soundboard(format: _fmt);
+      final mic1 = StreamController<Uint8List>();
+      final mic2 = StreamController<Uint8List>();
+      Future<Recording> record(StreamController<Uint8List> mic) => board
+          .asMicrophoneBackend(
+            physicalMic: StreamCaptureBackend(source: mic.stream, format: _fmt),
+          )
+          .startRecording(format: _fmt);
+      final rec1 = await record(mic1);
+      final rec2 = await record(mic2);
+      await board.play(
+        board.loadBytes(pcm16(List.filled(160, 1000)), format: _fmt),
+        outputs: const {SoundboardOutput.microphone},
+      );
+
+      mic1.add(pcm16(List.filled(160, 500)));
+      await pump();
+      mic2.add(pcm16(List.filled(160, 200)));
+      await pump();
+
+      expect(samples16(rec1.pcm), List.filled(160, 1500));
+      expect(samples16(rec2.pcm), List.filled(160, 1200));
+      await rec1.stop();
+      await rec2.stop();
+      await mic1.close();
+      await mic2.close();
+      await board.dispose();
+    });
+
+    test(
+      'pausing or stopping the recording returns clips to the timer',
+      () async {
+        final (board, micCtrl, rec) = await start();
+        final voice = await board.play(
+          board.loadBytes(pcm16(List.filled(8000, 1000)), format: _fmt),
+          outputs: const {SoundboardOutput.microphone},
+        );
+
+        await rec.pause();
+        await pump();
+        expect(voice.position, greaterThan(Duration.zero));
+
+        await rec.resume();
+        final resumedAt = voice.position;
+        await pump();
+        expect(voice.position, resumedAt);
+
+        await rec.stop();
+        await pump();
+        expect(voice.position, greaterThan(resumedAt));
+        await micCtrl.close();
+        await board.dispose();
+      },
+    );
+
     test('rejects a mic that delivers a different format', () async {
       final board = Soundboard(format: _fmt);
       addTearDown(board.dispose);
