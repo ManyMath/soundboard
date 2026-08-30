@@ -65,6 +65,10 @@ class PipeWireCommands {
   }) => [
     '-p',
     '--target=$sinkName',
+    // Exit rather than fall back to the default output (the speakers) when
+    // the bridge sink is missing or goes away.
+    '-P',
+    '{ node.dont-reconnect = true }',
     '--format=s16',
     '--rate=$sampleRate',
     '--channels=$channels',

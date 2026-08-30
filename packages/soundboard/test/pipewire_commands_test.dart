@@ -57,6 +57,8 @@ void main() {
         [
           '-p',
           '--target=soundboard_sink',
+          '-P',
+          '{ node.dont-reconnect = true }',
           '--format=s16',
           '--rate=48000',
           '--channels=1',
