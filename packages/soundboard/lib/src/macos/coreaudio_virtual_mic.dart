@@ -182,6 +182,7 @@ class CoreAudioVirtualMic implements VirtualMicrophone {
   Completer<void>? _feedDone;
   Pointer<Int16> _scratch = nullptr;
   int _scratchLen = 0;
+  late final _frames = S16leFrames(format.channels);
 
   /// Whether this environment can host a CoreAudio virtual microphone: macOS,
   /// with the native sink library loadable and the loopback [deviceName]
@@ -274,7 +275,7 @@ class CoreAudioVirtualMic implements VirtualMicrophone {
 
   void _writeChunk(Uint8List chunk) {
     if (_disposed || _sink == nullptr) return;
-    final samples = s16leSamples(chunk);
+    final samples = _frames.take(chunk);
     if (samples.isEmpty) return;
     final buf = _ensureScratch(samples.length);
     buf.asTypedList(samples.length).setAll(0, samples);

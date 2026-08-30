@@ -145,6 +145,7 @@ class WindowsVirtualMic implements VirtualMicrophone {
   Completer<void>? _feedDone;
   Pointer<Int16> _scratch = nullptr;
   int _scratchLength = 0;
+  late final _frames = S16leFrames(format.channels);
 
   /// Whether the Windows native library can open [sinkDeviceName].
   static Future<bool> isSupported({
@@ -225,7 +226,7 @@ class WindowsVirtualMic implements VirtualMicrophone {
 
   void _writeChunk(Uint8List chunk) {
     if (_disposed || _sink == nullptr) return;
-    final samples = s16leSamples(chunk);
+    final samples = _frames.take(chunk);
     if (samples.isEmpty) return;
     final buffer = _ensureScratch(samples.length);
     buffer.asTypedList(samples.length).setAll(0, samples);

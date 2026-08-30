@@ -30,4 +30,13 @@ void main() {
     ]);
     expect(s16leSamples(chunk), [5, 6]);
   });
+
+  test('carries a split sample and a partial frame to the next chunk', () {
+    final frames = S16leFrames(2);
+    final bytes = bytesOf([1, 2, 3, 4, 5, 6]);
+
+    expect(frames.take(Uint8List.sublistView(bytes, 0, 3)), isEmpty);
+    expect(frames.take(Uint8List.sublistView(bytes, 3, 9)), [1, 2, 3, 4]);
+    expect(frames.take(Uint8List.sublistView(bytes, 9)), [5, 6]);
+  });
 }

@@ -15,3 +15,25 @@ Int16List s16leSamples(Uint8List bytes) {
   }
   return samples;
 }
+
+/// Regroups arbitrarily split S16LE byte chunks into whole interleaved
+/// frames, carrying a partial frame over to the next chunk.
+final class S16leFrames {
+  S16leFrames(int channels) : _frameBytes = channels * 2;
+
+  final int _frameBytes;
+  Uint8List _carry = Uint8List(0);
+
+  /// The samples of every whole frame available once [chunk] is appended.
+  Int16List take(Uint8List chunk) {
+    var bytes = chunk;
+    if (_carry.isNotEmpty) {
+      bytes = Uint8List(_carry.length + chunk.length)
+        ..setAll(0, _carry)
+        ..setAll(_carry.length, chunk);
+    }
+    final whole = bytes.length - bytes.length % _frameBytes;
+    _carry = Uint8List.fromList(Uint8List.sublistView(bytes, whole));
+    return s16leSamples(Uint8List.sublistView(bytes, 0, whole));
+  }
+}
