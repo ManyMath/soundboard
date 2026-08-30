@@ -116,8 +116,11 @@ class PipeWireVirtualMic implements VirtualMicrophone {
 
   final Process _loopback;
   bool _loopbackExited = false;
+  bool _feeding = false;
   Process? _feeder;
-  Future<void>? _feedDone;
+  StreamSubscription<Uint8List>? _pcmSubscription;
+  StreamController<Uint8List>? _feederInput;
+  Completer<void>? _feedDone;
   bool _disposed = false;
 
   /// Whether this environment can host a PipeWire virtual microphone: Linux,
@@ -181,9 +184,27 @@ class PipeWireVirtualMic implements VirtualMicrophone {
   /// unawaited(vmic.feed(recording.frames));
   /// ```
   @override
-  Future<void> feed(Stream<Uint8List> pcm) async {
+  Future<void> feed(Stream<Uint8List> pcm) {
     if (_disposed) throw const PipeWireException('virtual mic disposed');
-    if (_feeder != null) throw StateError('feed() already called');
+    if (_feeding) throw StateError('feed() already called');
+    _feeding = true;
+    final done = _feedDone = Completer<void>();
+    unawaited(_startFeeder(pcm, done));
+    // Errors surface to callers that await/listen; a caller that fires and
+    // forgets must not crash the app with an unhandled async error.
+    done.future.ignore();
+    return done.future;
+  }
+
+  Future<void> _startFeeder(Stream<Uint8List> pcm, Completer<void> done) async {
+    void fail(String reason) {
+      if (_disposed || done.isCompleted) return;
+      done.completeError(
+        PipeWireException('feeding the virtual microphone failed: $reason'),
+      );
+      unawaited(_pcmSubscription?.cancel());
+    }
+
     final Process feeder;
     try {
       feeder = await Process.start(
@@ -195,28 +216,50 @@ class PipeWireVirtualMic implements VirtualMicrophone {
         ),
       );
     } on Object catch (e) {
-      throw PipeWireException('failed to start pw-cat: $e');
+      fail('could not start pw-cat: $e');
+      return;
+    }
+    if (_disposed) {
+      // dispose() ran while pw-cat was starting.
+      feeder.kill(ProcessSignal.sigkill);
+      return;
     }
     _feeder = feeder;
-    // Writing to a killed feeder raises a broken-pipe error on dispose; that
-    // is the normal way feeding ends, so it only surfaces as an error when the
-    // mic is still supposed to be live.
-    final done = feeder.stdin
-        .addStream(pcm)
-        .then((_) => feeder.stdin.close())
-        .then<void>(
-          (_) {},
-          onError: (Object e) {
-            if (!_disposed) {
-              throw PipeWireException(
-                'feeding the virtual microphone failed: $e',
-              );
-            }
-          },
-        );
-    // dispose() awaits the swallowed variant so it never rethrows there.
-    _feedDone = done.catchError((Object _) {});
-    return done;
+
+    // Relay through a controller dispose() can close: pw-cat blocked on an
+    // idle stdin ignores SIGTERM and only exits promptly at EOF.
+    var pcmEnded = false;
+    final input = _feederInput = StreamController<Uint8List>();
+    final subscription = _pcmSubscription = pcm.listen(
+      input.add,
+      onError: input.addError,
+      onDone: () {
+        pcmEnded = true;
+        input.close();
+      },
+    );
+    input
+      ..onPause = subscription.pause
+      ..onResume = subscription.resume;
+
+    unawaited(
+      feeder.stdin
+          .addStream(input.stream)
+          .then((_) => feeder.stdin.close())
+          .then<void>((_) {
+            if (!done.isCompleted) done.complete();
+          }, onError: (Object e) => fail('$e')),
+    );
+    unawaited(
+      feeder.exitCode.then((code) {
+        if (!pcmEnded) fail('pw-cat exited with code $code');
+      }),
+    );
+    unawaited(
+      _loopback.exitCode.then(
+        (code) => fail('pw-loopback exited with code $code'),
+      ),
+    );
   }
 
   /// Removes the virtual microphone by stopping its processes. Idempotent.
@@ -225,9 +268,12 @@ class PipeWireVirtualMic implements VirtualMicrophone {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    final done = _feedDone;
+    if (done != null && !done.isCompleted) done.complete();
+    await _pcmSubscription?.cancel();
+    unawaited(_feederInput?.close());
     _feeder?.kill();
     _loopback.kill();
-    await _feedDone;
     await _safeExit(_feeder);
     await _safeExit(_loopback);
   }
@@ -279,8 +325,11 @@ class PipeWireVirtualMic implements VirtualMicrophone {
     if (p == null) return;
     try {
       await p.exitCode.timeout(const Duration(seconds: 2));
+    } on TimeoutException {
+      p.kill(ProcessSignal.sigkill);
+      await p.exitCode.timeout(const Duration(seconds: 1), onTimeout: () => 0);
     } on Object {
-      // Already gone or slow to reap; nothing more we can do safely.
+      // Already gone; nothing more to reap.
     }
   }
 }
