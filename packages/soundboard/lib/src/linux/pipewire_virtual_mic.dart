@@ -166,6 +166,7 @@ class PipeWireVirtualMic implements VirtualMicrophone {
     } on Object catch (e) {
       throw PipeWireException('failed to start pw-loopback: $e');
     }
+    _discardOutput(loopback);
     final mic = PipeWireVirtualMic._(loopback, sink, source, name, format);
     if (!await mic._waitForNode(source, const Duration(seconds: 5))) {
       await mic.dispose();
@@ -229,6 +230,7 @@ class PipeWireVirtualMic implements VirtualMicrophone {
       return;
     }
     _feeder = feeder;
+    _discardOutput(feeder);
 
     // Relay through a controller dispose() can close: pw-cat blocked on an
     // idle stdin ignores SIGTERM and only exits promptly at EOF.
@@ -335,5 +337,11 @@ class PipeWireVirtualMic implements VirtualMicrophone {
     } on Object {
       // Already gone; nothing more to reap.
     }
+  }
+
+  // Unread pipes stay open for the life of the process.
+  static void _discardOutput(Process p) {
+    p.stdout.drain<void>().ignore();
+    p.stderr.drain<void>().ignore();
   }
 }
