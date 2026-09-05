@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
 import 'package:soundboard_flutter/soundboard_flutter.dart';
@@ -58,10 +59,20 @@ class _HomePageState extends State<HomePage> {
   Clip? _beep;
   Clip? _chord;
 
+  late final AppLifecycleListener _lifecycle;
+
   @override
   void initState() {
     super.initState();
+    _lifecycle = AppLifecycleListener(onExitRequested: _onExitRequested);
     _bootstrap();
+  }
+
+  // Closing the window does not dispose this State, and on Linux the
+  // PipeWire helpers (and so the virtual device) would outlive the app.
+  Future<AppExitResponse> _onExitRequested() async {
+    await _teardown();
+    return AppExitResponse.exit;
   }
 
   Future<void> _bootstrap() async {
@@ -175,6 +186,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    _lifecycle.dispose();
     unawaited(_teardown());
     super.dispose();
   }
