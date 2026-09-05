@@ -158,21 +158,19 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  bool _tearingDown = false;
-
   Future<void> _teardown() async {
-    if (_tearingDown) return;
-    _tearingDown = true;
-    try {
-      await _recording?.stop().catchError((Object _) => Uint8List(0));
-      await _vmic?.dispose();
-      await _board?.dispose();
-      _recording = null;
-      _vmic = null;
-      _board = null;
-    } finally {
-      _tearingDown = false;
-    }
+    // Detach first: a _start still in flight may assign new resources while
+    // this awaits, and clearing the fields afterwards would leak those.
+    final recording = _recording;
+    final vmic = _vmic;
+    final board = _board;
+    _recording = null;
+    _vmic = null;
+    _board = null;
+    await recording?.stop().catchError((Object _) => Uint8List(0));
+    await recording?.dispose();
+    await vmic?.dispose();
+    await board?.dispose();
   }
 
   @override
