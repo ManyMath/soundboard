@@ -78,7 +78,8 @@ melos:
         dart test microphone/packages/microphone_dart &&
         dart test ../../mixer/packages/mixer_dart &&
         dart test packages/soundboard &&
-        flutter test packages/soundboard_flutter/test
+        flutter test packages/soundboard_flutter/test &&
+        flutter test apps/soundboard_example/test
     native:build:
       description: Build the vendored shared libraries (for CLI/dev use).
       run: >-
