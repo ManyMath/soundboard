@@ -233,12 +233,16 @@ impl WinMMPlayback {
         })
     }
 
-    fn wait_for_hdr(hdr: &WaveHdr) -> Result<(), String> {
+    /// Polls until the driver is done with `hdr`, returning the flags it saw.
+    /// The driver sets WHDR_DONE from its own thread, so the read must be
+    /// volatile: through a `&WaveHdr` the compiler may hoist the load out of
+    /// the loop and spin on a stale value until the stall timeout.
+    fn wait_for_hdr(hdr: *const WaveHdr) -> Result<u32, String> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
-            let flags = hdr.flags;
+            let flags = unsafe { std::ptr::read_volatile(std::ptr::addr_of!((*hdr).flags)) };
             if flags & WHDR_PREPARED == 0 || flags & WHDR_DONE != 0 {
-                return Ok(());
+                return Ok(flags);
             }
             if std::time::Instant::now() >= deadline {
                 return Err("waveOut buffer stalled for more than one second".to_string());
@@ -257,9 +261,9 @@ impl PcmSink for WinMMPlayback {
         let ring = unsafe { &mut *self.ring.get() };
         for chunk in bytes.chunks(buf_bytes) {
             let idx = ring.next % NUM_BUFFERS;
-            Self::wait_for_hdr(&ring.hdrs[idx])?;
+            let flags = Self::wait_for_hdr(&ring.hdrs[idx])?;
 
-            if ring.hdrs[idx].flags & WHDR_PREPARED != 0 {
+            if flags & WHDR_PREPARED != 0 {
                 unsafe {
                     (self.wmm.wave_out_unprepare_header)(
                         self.handle,
@@ -357,5 +361,38 @@ mod tests {
     #[test]
     fn loads_winmm() {
         WinMM::load().expect("winmm.dll loads on this host");
+    }
+
+    #[test]
+    fn wait_for_hdr_sees_flags_set_by_another_thread() {
+        struct SendPtr(*mut WaveHdr);
+        unsafe impl Send for SendPtr {}
+
+        let hdr = Box::into_raw(Box::new(WaveHdr {
+            data: std::ptr::null_mut(),
+            buffer_length: 0,
+            bytes_recorded: 0,
+            user: 0,
+            flags: WHDR_PREPARED,
+            loops: 0,
+            next: std::ptr::null_mut(),
+            reserved: 0,
+        }));
+        // Stands in for the driver marking the buffer done mid-poll.
+        let driver = SendPtr(hdr);
+        let driver = std::thread::spawn(move || {
+            let driver = driver;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            unsafe {
+                std::ptr::write_volatile(
+                    std::ptr::addr_of_mut!((*driver.0).flags),
+                    WHDR_PREPARED | WHDR_DONE,
+                );
+            }
+        });
+        let result = WinMMPlayback::wait_for_hdr(hdr);
+        driver.join().unwrap();
+        drop(unsafe { Box::from_raw(hdr) });
+        assert_eq!(result, Ok(WHDR_PREPARED | WHDR_DONE));
     }
 }
