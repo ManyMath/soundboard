@@ -21,20 +21,28 @@ Future<void> main() async {
 }
 
 class SoundboardApp extends StatelessWidget {
-  const SoundboardApp({super.key});
+  const SoundboardApp({
+    super.key,
+    this.supportProbe = VirtualMicPlatform.support,
+  });
+
+  /// Reports virtual-mic support; tests replace it to avoid probing the host.
+  final Future<VirtualMicSupport> Function() supportProbe;
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Soundboard',
       theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
-      home: const HomePage(),
+      home: HomePage(supportProbe: supportProbe),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({super.key, this.supportProbe = VirtualMicPlatform.support});
+
+  final Future<VirtualMicSupport> Function() supportProbe;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -76,7 +84,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _bootstrap() async {
-    final support = await VirtualMicPlatform.support();
+    final support = await widget.supportProbe();
     List<CaptureDevice> inputs = const [];
     try {
       inputs = await Microphone.devices();

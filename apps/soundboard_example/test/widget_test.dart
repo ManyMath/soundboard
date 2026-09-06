@@ -5,10 +5,21 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:soundboard_example/main.dart';
+import 'package:soundboard_example/virtual_mic.dart';
 
 void main() {
   testWidgets('app renders the virtual-microphone controls', (tester) async {
-    await tester.pumpWidget(const SoundboardApp());
+    // The real probe starts host processes (pw-cli on Linux) that never
+    // finish under the test's fake clock.
+    await tester.pumpWidget(
+      SoundboardApp(
+        supportProbe: () async => const VirtualMicSupport(
+          supported: false,
+          platformLabel: 'test',
+          hint: 'none',
+        ),
+      ),
+    );
     // The support probe runs in initState; let it settle.
     await tester.pumpAndSettle();
 
