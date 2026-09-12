@@ -3,6 +3,7 @@
 //! FLAC with no system dependencies.
 
 use std::io::Cursor;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -94,6 +95,15 @@ pub struct StreamDecoder {
 
 impl StreamDecoder {
     fn open(mss: MediaSourceStream, format_hint: Option<&str>) -> Result<StreamDecoder, String> {
+        catch_panic("unsupported or invalid audio", || {
+            Self::try_open(mss, format_hint)
+        })
+    }
+
+    fn try_open(
+        mss: MediaSourceStream,
+        format_hint: Option<&str>,
+    ) -> Result<StreamDecoder, String> {
         let mut hint = Hint::new();
         if let Some(ext) = format_hint {
             hint.with_extension(ext);
@@ -139,6 +149,10 @@ impl StreamDecoder {
     /// buffered decoder's behavior), only failing on a genuine I/O or format
     /// error.
     pub fn next_chunk(&mut self) -> Result<Option<Vec<i16>>, String> {
+        catch_panic("decode error", || self.try_next_chunk())
+    }
+
+    fn try_next_chunk(&mut self) -> Result<Option<Vec<i16>>, String> {
         loop {
             let packet = match self.format.next_packet() {
                 Ok(p) => p,
@@ -179,6 +193,21 @@ impl StreamDecoder {
             }
         }
     }
+}
+
+/// Runs `f`, turning a panic into an error prefixed with `context`. symphonia
+/// panics on some malformed input (a WAV with a zero sample rate trips
+/// `TimeBase::new`), and that must not unwind into the C ABI, which aborts
+/// the host process, or silently kill a voice's decode thread.
+fn catch_panic<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    panic::catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|payload| {
+        let msg = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("unknown panic");
+        Err(format!("{context}: decoder panicked: {msg}"))
+    })
 }
 
 #[cfg(test)]
@@ -268,6 +297,17 @@ mod tests {
     #[test]
     fn rejects_garbage() {
         assert!(decode_bytes(&[0u8; 64], None).is_err());
+    }
+
+    #[test]
+    fn zero_sample_rate_is_an_error_not_a_panic() {
+        let mut wav = const_wav(1, 8_000, 16, SampleFormat::Int, 16, 1);
+        assert_eq!(wav[24..28], 8_000u32.to_le_bytes());
+        wav[24..28].copy_from_slice(&0u32.to_le_bytes());
+        let err = decode_bytes(&wav, Some("wav"))
+            .err()
+            .expect("decode should fail");
+        assert!(err.starts_with("unsupported or invalid audio"), "{err}");
     }
 
     /// Encodes 16-bit samples to FLAC (lossless) in memory.

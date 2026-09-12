@@ -1493,4 +1493,16 @@ mod tests {
         let d = unsafe { sound_decode_bytes(garbage.as_ptr(), garbage.len(), std::ptr::null()) };
         assert!(d.is_null());
     }
+
+    #[test]
+    fn decode_ffi_reports_a_decoder_panic_as_an_error() {
+        // A zero sample rate makes symphonia panic; unwinding out of the
+        // extern "C" function would abort the whole process.
+        let mut bytes = sine_wav();
+        bytes[24..28].copy_from_slice(&0u32.to_le_bytes());
+        let d = unsafe { sound_decode_bytes(bytes.as_ptr(), bytes.len(), std::ptr::null()) };
+        assert!(d.is_null());
+        let err = unsafe { CStr::from_ptr(sound_last_error()) };
+        assert!(err.to_str().unwrap().contains("panicked"), "{err:?}");
+    }
 }
