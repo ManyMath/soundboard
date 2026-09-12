@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use libloading::Library;
 
+use crate::winmm_name::match_output_device;
 use crate::PcmSink;
 
 const WAVE_FORMAT_PCM: u16 = 1;
@@ -107,16 +108,14 @@ impl WinMM {
         }
     }
 
-    /// Finds an output by its WinMM display name. Drivers may truncate names
-    /// to 31 UTF-16 units, so either side being a case-insensitive prefix is
-    /// accepted in addition to an exact match.
+    /// Finds an output by its WinMM display name; see [match_output_device]
+    /// for how names are compared.
     fn find_output_device(&self, wanted: &str) -> Result<u32, String> {
-        let wanted = wanted.trim().to_lowercase();
-        if wanted.is_empty() {
+        if wanted.trim().is_empty() {
             return Err("output device name is empty".to_string());
         }
         let count = unsafe { (self.wave_out_get_num_devs)() };
-        let mut available = Vec::new();
+        let mut devices = Vec::new();
         for id in 0..count {
             let mut caps = WaveOutCapsW {
                 mid: 0,
@@ -143,17 +142,16 @@ impl WinMM {
                 .iter()
                 .position(|&unit| unit == 0)
                 .unwrap_or(MAXPNAMELEN);
-            let name = String::from_utf16_lossy(&caps.pname[..end]);
-            let folded = name.to_lowercase();
-            if folded == wanted || folded.starts_with(&wanted) || wanted.starts_with(&folded) {
-                return Ok(id);
-            }
-            available.push(name);
+            devices.push((id, String::from_utf16_lossy(&caps.pname[..end])));
         }
-        Err(format!(
-            "output device {wanted:?} not found (available: {})",
-            available.join(", ")
-        ))
+        match_output_device(wanted, &devices).ok_or_else(|| {
+            let available: Vec<&str> = devices.iter().map(|(_, name)| name.as_str()).collect();
+            format!(
+                "output device {:?} not found (available: {})",
+                wanted.trim(),
+                available.join(", ")
+            )
+        })
     }
 }
 

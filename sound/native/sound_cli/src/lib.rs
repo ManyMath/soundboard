@@ -35,6 +35,8 @@ mod sink;
 
 #[cfg(target_os = "windows")]
 mod winmm;
+#[cfg(any(target_os = "windows", test))]
+mod winmm_name;
 
 #[cfg(target_os = "macos")]
 use sink::Sink as NamedOutputSink;
