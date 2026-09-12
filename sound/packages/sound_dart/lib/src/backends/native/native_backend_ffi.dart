@@ -431,7 +431,9 @@ class FfiPlayback implements Playback {
   Future<void> play() async {
     if (_state == PlaybackState.disposed) return;
     _freeVoice();
-    _completer = Completer<void>();
+    // A failed voice completes this with an error. Listeners still see it,
+    // but fire-and-forget callers must not get an uncaught async error.
+    _completer = Completer<void>()..future.ignore();
     _voiceId = _start();
     if (_voiceId == 0) {
       _state = PlaybackState.idle;

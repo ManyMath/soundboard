@@ -289,6 +289,25 @@ void main() {
         await expectLater(pb.onComplete, throwsA(isA<PlaybackException>()));
       });
 
+      test('a failure nobody listens for is not an uncaught error', () async {
+        Sound.registerBackend(FfiBackend(), makeActive: true);
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((req) {
+          req.response.statusCode = 404;
+          req.response.close();
+        });
+        addTearDown(() => server.close(force: true));
+        final url = 'http://${server.address.host}:${server.port}/missing.wav';
+        // Fire and forget: onComplete is never read, so a failure reported
+        // through it must not escape to the zone and fail this test.
+        final pb = await Sound.playUrl(url);
+        for (var i = 0; i < 100 && pb.state != PlaybackState.stopped; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
+        expect(pb.state, PlaybackState.stopped);
+        await pb.dispose();
+      });
+
       test('replaying the same handle restarts and completes', () async {
         Sound.registerBackend(FfiBackend(), makeActive: true);
         final pb = await Sound.playBytes(
