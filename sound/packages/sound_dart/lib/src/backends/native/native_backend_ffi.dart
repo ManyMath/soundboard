@@ -567,8 +567,13 @@ class FfiPlayback implements Playback {
   Future<void> stop() async {
     if (_voiceId != 0) {
       _b.stop(_player, _voiceId);
-      // Reflect the request immediately; the poll will confirm.
-      if (_state == PlaybackState.playing) _state = PlaybackState.stopped;
+      // The poll is cancelled below, so nothing else will move a voice that
+      // was still connecting, playing or paused out of that state.
+      if (_state == PlaybackState.connecting ||
+          _state == PlaybackState.playing ||
+          _state == PlaybackState.paused) {
+        _state = PlaybackState.stopped;
+      }
     }
     _poll?.cancel();
     _poll = null;
@@ -588,7 +593,7 @@ class FfiPlayback implements Playback {
 
   @override
   Future<void> pause() async {
-    if (_voiceId != 0) {
+    if (_voiceId != 0 && _state == PlaybackState.playing) {
       _b.pause(_player, _voiceId);
       _state = PlaybackState.paused;
     }
@@ -596,7 +601,7 @@ class FfiPlayback implements Playback {
 
   @override
   Future<void> resume() async {
-    if (_voiceId != 0) {
+    if (_voiceId != 0 && _state == PlaybackState.paused) {
       _b.resume(_player, _voiceId);
       _state = PlaybackState.playing;
     }

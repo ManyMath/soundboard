@@ -160,5 +160,17 @@ void main() {
       await pb.resume();
       expect(pb.isPlaying, isTrue);
     });
+
+    test('stop while paused stops, and resume does not restart it', () async {
+      final pb = SilentPlayback(const Duration(milliseconds: 20));
+      await pb.play();
+      await pb.pause();
+      await pb.stop();
+      expect(pb.state, PlaybackState.stopped);
+      await pb.resume();
+      expect(pb.isPlaying, isFalse);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(pb.state, PlaybackState.stopped);
+    });
   });
 }

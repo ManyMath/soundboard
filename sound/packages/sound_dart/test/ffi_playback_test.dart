@@ -271,6 +271,20 @@ void main() {
         },
       );
 
+      test('stop while connecting moves to stopped', () async {
+        Sound.registerBackend(FfiBackend(), makeActive: true);
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        // Never answers, so the voice stays connecting until stopped.
+        server.listen((_) {});
+        addTearDown(() => server.close(force: true));
+        final url = 'http://${server.address.host}:${server.port}/tone.wav';
+        final pb = await Sound.playUrl(url);
+        expect(pb.state, PlaybackState.connecting);
+        await pb.stop();
+        expect(pb.state, PlaybackState.stopped);
+        await pb.dispose();
+      });
+
       test('playUrl surfaces a clear error on HTTP failure', () async {
         Sound.registerBackend(FfiBackend(), makeActive: true);
         final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
