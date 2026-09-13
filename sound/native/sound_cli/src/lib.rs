@@ -551,32 +551,27 @@ fn run_voice_url<S: PcmSink>(
 ) {
     // The voice's stop flag doubles as the download-abort signal, so freeing
     // or stopping the voice cancels the fetch and unblocks the probe/decode.
+    // The failure that produces is the stop, not an error.
+    let fail = |e: String| {
+        if sh.stop.load(Ordering::SeqCst) {
+            sh.state.store(STATE_STOPPED, Ordering::SeqCst);
+        } else {
+            *sh.error.lock().unwrap() = Some(e);
+            sh.state.store(STATE_ERROR, Ordering::SeqCst);
+        }
+    };
     let mut decoder =
         match decode::open_url_decoder(url, headers, format_hint.as_deref(), sh.stop.clone()) {
             Ok(d) => d,
-            Err(e) => {
-                *sh.error.lock().unwrap() = Some(e);
-                sh.state.store(STATE_ERROR, Ordering::SeqCst);
-                return;
-            }
+            Err(e) => return fail(e),
         };
     let first_chunk = match decoder.next_chunk() {
         Ok(Some(chunk)) => chunk,
-        Ok(None) => {
-            *sh.error.lock().unwrap() = Some("stream ended before any audio decoded".to_string());
-            sh.state.store(STATE_ERROR, Ordering::SeqCst);
-            return;
-        }
-        Err(e) => {
-            *sh.error.lock().unwrap() = Some(e);
-            sh.state.store(STATE_ERROR, Ordering::SeqCst);
-            return;
-        }
+        Ok(None) => return fail("stream ended before any audio decoded".to_string()),
+        Err(e) => return fail(e),
     };
     if decoder.channels == 0 || decoder.rate == 0 {
-        *sh.error.lock().unwrap() = Some("decoded zero audio frames".to_string());
-        sh.state.store(STATE_ERROR, Ordering::SeqCst);
-        return;
+        return fail("decoded zero audio frames".to_string());
     }
 
     let channels = decoder.channels;
@@ -1492,6 +1487,41 @@ mod tests {
         let garbage = [0u8; 64];
         let d = unsafe { sound_decode_bytes(garbage.as_ptr(), garbage.len(), std::ptr::null()) };
         assert!(d.is_null());
+    }
+
+    #[test]
+    fn stopping_a_connecting_url_voice_reports_stopped() {
+        struct NullSink;
+        impl PcmSink for NullSink {
+            fn write(&self, _: &[i16]) -> Result<(), String> {
+                Ok(())
+            }
+            fn drain(&self) {}
+        }
+
+        // Accepts the connection but never answers, so the voice stays
+        // connecting until it is stopped.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/track.wav", listener.local_addr().unwrap());
+        let sh = VoiceShared::new(false);
+        sh.state.store(STATE_CONNECTING, Ordering::SeqCst);
+        let stop = sh.stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            stop.store(true, Ordering::SeqCst);
+        });
+        run_voice_url(
+            url,
+            Vec::new(),
+            None,
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            &sh,
+            |_, _| -> Result<NullSink, String> { panic!("no sink without audio") },
+        );
+        assert_eq!(sh.state.load(Ordering::SeqCst), STATE_STOPPED);
+        assert_eq!(*sh.error.lock().unwrap(), None);
+        drop(listener);
     }
 
     #[test]
