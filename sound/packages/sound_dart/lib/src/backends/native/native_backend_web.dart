@@ -112,7 +112,8 @@ class WebAudioPlayback implements Playback {
   @override
   Future<void> play() async {
     if (_state == PlaybackState.disposed) return;
-    _completer = Completer<void>();
+    // Keep a pending completer: onComplete may have been read before play().
+    if (_completer?.isCompleted ?? true) _completer = Completer<void>();
     _startSource(0);
     _state = PlaybackState.playing;
   }

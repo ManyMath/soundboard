@@ -308,6 +308,25 @@ void main() {
         await pb.dispose();
       });
 
+      test('onComplete read before play settles with that play', () async {
+        Sound.registerBackend(FfiBackend(), makeActive: true);
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen((req) {
+          req.response.statusCode = 404;
+          req.response.close();
+        });
+        addTearDown(() => server.close(force: true));
+        final url = 'http://${server.address.host}:${server.port}/missing.wav';
+        final pb = await Sound.loadUrl(url);
+        final done = pb.onComplete;
+        await pb.play();
+        await expectLater(
+          done.timeout(const Duration(seconds: 5)),
+          throwsA(isA<PlaybackException>()),
+        );
+        await pb.dispose();
+      });
+
       test('replaying the same handle restarts and completes', () async {
         Sound.registerBackend(FfiBackend(), makeActive: true);
         final pb = await Sound.playBytes(

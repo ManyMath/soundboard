@@ -425,15 +425,14 @@ class FfiPlayback implements Playback {
   bool get isPlaying => _state == PlaybackState.playing;
 
   @override
-  Future<void> get onComplete => (_completer ??= Completer<void>()).future;
+  Future<void> get onComplete => (_completer ??= _newCompleter()).future;
 
   @override
   Future<void> play() async {
     if (_state == PlaybackState.disposed) return;
     _freeVoice();
-    // A failed voice completes this with an error. Listeners still see it,
-    // but fire-and-forget callers must not get an uncaught async error.
-    _completer = Completer<void>()..future.ignore();
+    // Keep a pending completer: onComplete may have been read before play().
+    if (_completer?.isCompleted ?? true) _completer = _newCompleter();
     _voiceId = _start();
     if (_voiceId == 0) {
       _state = PlaybackState.idle;
@@ -451,6 +450,10 @@ class FfiPlayback implements Playback {
       (_) => _checkState(),
     );
   }
+
+  // A failed voice completes this with an error. Listeners still see it, but
+  // fire-and-forget callers must not get an uncaught async error.
+  static Completer<void> _newCompleter() => Completer<void>()..future.ignore();
 
   int _start() {
     final loopFlag = _looping ? 1 : 0;
