@@ -55,6 +55,44 @@ Uint8List constWav({
 }
 
 void main() {
+  group('PcmStream', () {
+    test('rejects a non-positive chunk size', () {
+      expect(
+        () => PcmStream(
+          samples: Int16List(16),
+          channels: 1,
+          sampleRate: 8000,
+          chunkFrames: 0,
+        ),
+        throwsArgumentError,
+      );
+    });
+
+    test('never emits ahead of the sample rate', () async {
+      // 12 frames at 8 kHz is 1.5 ms per chunk, which a whole-millisecond
+      // periodic timer would round down to 1 ms and run 50% fast.
+      const rate = 8000;
+      const chunk = 12;
+      final s = PcmStream(
+        samples: Int16List(rate),
+        channels: 1,
+        sampleRate: rate,
+        chunkFrames: chunk,
+      );
+      var frames = 0;
+      final sub = s.frames.listen((c) => frames += c.length);
+      final clock = Stopwatch()..start();
+      await s.start();
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      await s.stop();
+      final elapsed = clock.elapsedMicroseconds;
+      await sub.cancel();
+      final due = elapsed * rate ~/ Duration.microsecondsPerSecond;
+      expect(frames, lessThanOrEqualTo(due + chunk));
+      expect(frames, greaterThan(due ~/ 2));
+    });
+  });
+
   group('PCM tap via SilentBackend', () {
     setUp(() => Sound.reset());
     tearDown(() => Sound.reset());
