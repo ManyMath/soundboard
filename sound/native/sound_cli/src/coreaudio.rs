@@ -144,6 +144,7 @@ pub struct CoreAudioPlayback<'a> {
     channel: Box<Channel>,
     started: AtomicBool,
     channels: u32,
+    rate: u32,
     frames_written: AtomicU64,
     buffers: Vec<AudioQueueBufferRef>,
 }
@@ -219,6 +220,7 @@ impl<'a> CoreAudioPlayback<'a> {
                 channel,
                 started: AtomicBool::new(false),
                 channels,
+                rate,
                 frames_written: AtomicU64::new(0),
                 buffers,
             })
@@ -329,8 +331,10 @@ impl PcmSink for CoreAudioPlayback<'_> {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let buffered_ms = (RING_BUFFERS * FRAMES_PER_BUFFER) as u64 * 1000 / 44_100;
-        std::thread::sleep(std::time::Duration::from_millis(buffered_ms.min(500)));
+        // The cap only guards against a nonsensical rate; 8 kHz needs ~1 s.
+        let buffered_ms =
+            (RING_BUFFERS * FRAMES_PER_BUFFER) as u64 * 1000 / self.rate.max(1) as u64;
+        std::thread::sleep(std::time::Duration::from_millis(buffered_ms.min(2_000)));
         unsafe {
             // immediate=true so the next dispose does not have to wait.
             (self.ca.stop)(self.queue, 1);
