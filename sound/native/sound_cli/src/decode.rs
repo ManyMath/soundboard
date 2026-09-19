@@ -73,8 +73,12 @@ pub fn open_url_decoder(
     stop: Arc<AtomicBool>,
 ) -> Result<StreamDecoder, String> {
     let source = StreamingSource::fetch(url, headers, stop);
+    let read_error = source.read_error();
     let mss = MediaSourceStream::new(Box::new(source), Default::default());
+    // The probe reports a failed read as an unrecognized format, so prefer
+    // the error the source actually returned.
     StreamDecoder::open(mss, format_hint)
+        .map_err(|e| read_error.lock().unwrap().take().unwrap_or(e))
 }
 
 /// Decodes one packet at a time from a [MediaSourceStream], so a caller can
@@ -452,5 +456,43 @@ mod tests {
         }
         assert_eq!(decoder.rate, 22_050);
         assert_eq!(samples.len(), 8);
+    }
+
+    fn open_url_error(url: String) -> String {
+        open_url_decoder(url, Vec::new(), None, Arc::new(AtomicBool::new(false)))
+            .err()
+            .expect("open should fail")
+    }
+
+    #[test]
+    fn open_url_decoder_reports_http_status() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut discard = [0u8; 4096];
+            let _ = std::io::Read::read(&mut stream, &mut discard);
+            stream
+                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let err = open_url_error(format!("http://{addr}/missing.wav"));
+        assert!(err.contains("404"), "{err}");
+    }
+
+    #[test]
+    fn open_url_decoder_reports_connection_failure() {
+        // Nothing is listening on this port.
+        let err = open_url_error("http://127.0.0.1:1/track.wav".to_string());
+        assert!(err.starts_with("connect"), "{err}");
+    }
+
+    #[test]
+    fn open_url_decoder_keeps_format_errors_for_bad_bodies() {
+        let url = serve_slowly(vec![0u8; 2048]);
+        let err = open_url_error(url);
+        assert!(err.starts_with("unsupported or invalid audio"), "{err}");
     }
 }

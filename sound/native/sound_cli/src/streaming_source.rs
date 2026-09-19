@@ -46,6 +46,8 @@ pub struct StreamingSource {
     stop: Arc<AtomicBool>,
     /// Set on drop so the fetch thread exits when nobody can read anymore.
     dropped: Arc<AtomicBool>,
+    /// The last error a read or seek returned; see [Self::read_error].
+    read_error: Arc<Mutex<Option<String>>>,
 }
 
 impl StreamingSource {
@@ -77,7 +79,21 @@ impl StreamingSource {
             pos: 0,
             stop,
             dropped,
+            read_error: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Returns a handle to the last error this source returned to a reader.
+    /// symphonia's format probe treats a failed read as "no format found",
+    /// so this is how a caller recovers the real reason (a refused
+    /// connection, an HTTP error status) after the source is gone.
+    pub fn read_error(&self) -> Arc<Mutex<Option<String>>> {
+        self.read_error.clone()
+    }
+
+    fn fail(&self, msg: String) -> io::Error {
+        *self.read_error.lock().unwrap() = Some(msg.clone());
+        io::Error::other(msg)
     }
 
     fn run(
@@ -149,7 +165,7 @@ impl StreamingSource {
             // Not ErrorKind::Interrupted -- Read wrappers retry on that, which
             // would turn a stop into a busy loop.
             if self.stop.load(Ordering::SeqCst) {
-                return Err(io::Error::other("playback stopped"));
+                return Err(self.fail("playback stopped".to_string()));
             }
             // A timed wait so the stop flag is observed even when no data or
             // completion notification ever arrives.
@@ -158,7 +174,7 @@ impl StreamingSource {
         }
         if let Some(e) = &state.error {
             if (state.buf.len() as u64) < upto {
-                return Err(io::Error::other(e.clone()));
+                return Err(self.fail(e.clone()));
             }
         }
         Ok(())

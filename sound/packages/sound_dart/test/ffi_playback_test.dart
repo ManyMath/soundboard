@@ -300,7 +300,16 @@ void main() {
         // surfaces through onComplete instead, the same as a failure partway
         // through an already-playing stream.
         final pb = await Sound.playUrl(url);
-        await expectLater(pb.onComplete, throwsA(isA<PlaybackException>()));
+        await expectLater(
+          pb.onComplete,
+          throwsA(
+            isA<PlaybackException>().having(
+              (e) => e.message,
+              'message',
+              contains('HTTP status 404'),
+            ),
+          ),
+        );
       });
 
       test('a failure nobody listens for is not an uncaught error', () async {
