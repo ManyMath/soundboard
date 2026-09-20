@@ -26,6 +26,8 @@ mod alsa;
 #[cfg(target_os = "android")]
 mod aaudio;
 
+#[cfg(any(target_os = "macos", target_os = "ios", test))]
+mod bounded_send;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod coreaudio;
 

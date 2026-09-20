@@ -16,6 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use libloading::Library;
 
+use crate::bounded_send::send_or_stall;
 use crate::PcmSink;
 
 const K_LINEAR_PCM: u32 = u32::from_be_bytes(*b"lpcm");
@@ -227,6 +228,13 @@ impl<'a> CoreAudioPlayback<'a> {
         }
     }
 
+    // A healthy queue frees a channel slot every buffer (2048 frames); give up
+    // after a second, or four buffers at low rates, without progress.
+    fn stall_timeout(&self) -> std::time::Duration {
+        let buffer_ms = FRAMES_PER_BUFFER as u64 * 1000 / self.rate.max(1) as u64;
+        std::time::Duration::from_millis((4 * buffer_ms).max(1000))
+    }
+
     fn ensure_started(&self) -> Result<(), String> {
         // compare_exchange so exactly one caller starts the queue even when
         // driven from more than one thread.
@@ -308,9 +316,7 @@ impl PcmSink for CoreAudioPlayback<'_> {
         let frames_per_send = FRAMES_PER_BUFFER as usize;
         let stride = frames_per_send * self.channels as usize;
         for chunk in samples.chunks(stride) {
-            self.tx
-                .send(chunk.to_vec())
-                .map_err(|e| format!("audio channel closed: {e}"))?;
+            send_or_stall(&self.tx, chunk.to_vec(), self.stall_timeout())?;
         }
         self.frames_written.fetch_add(
             samples.len() as u64 / self.channels as u64,
