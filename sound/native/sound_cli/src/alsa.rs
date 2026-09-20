@@ -128,30 +128,41 @@ impl<'a> PcmPlayback<'a> {
     /// Writes one interleaved chunk of S16LE samples, recovering from
     /// underruns. Returns the number of frames written, or an error string.
     pub fn write(&self, samples: &[i16]) -> Result<usize, String> {
-        let frames = (samples.len() / self.channels as usize) as c_ulong;
-        if frames == 0 {
-            return Ok(0);
-        }
-        unsafe {
-            let mut written =
-                (self.alsa.pcm_writei)(self.pcm, samples.as_ptr() as *const c_void, frames);
-            if written < 0 {
+        let channels = self.channels as usize;
+        let frames = samples.len() / channels;
+        let mut written = 0;
+        let mut retrying = false;
+        // A signal or an underrun can cut a write short, so keep going until
+        // the whole chunk is in rather than dropping the rest.
+        while written < frames {
+            let rest = &samples[written * channels..];
+            let rc = unsafe {
+                (self.alsa.pcm_writei)(
+                    self.pcm,
+                    rest.as_ptr() as *const c_void,
+                    (frames - written) as c_ulong,
+                )
+            };
+            if rc > 0 {
+                written += rc as usize;
+                retrying = false;
+            } else if rc == 0 {
+                break;
+            } else if retrying {
+                return Err(format!(
+                    "snd_pcm_writei (retry): {}",
+                    self.alsa.strerror(rc as c_int)
+                ));
+            } else {
                 // Try to recover from underrun/suspend, then retry once.
-                let rc = (self.alsa.pcm_recover)(self.pcm, written as c_int, 1);
+                let rc = unsafe { (self.alsa.pcm_recover)(self.pcm, rc as c_int, 1) };
                 if rc < 0 {
                     return Err(format!("snd_pcm_writei: {}", self.alsa.strerror(rc)));
                 }
-                written =
-                    (self.alsa.pcm_writei)(self.pcm, samples.as_ptr() as *const c_void, frames);
-                if written < 0 {
-                    return Err(format!(
-                        "snd_pcm_writei (retry): {}",
-                        self.alsa.strerror(written as c_int)
-                    ));
-                }
+                retrying = true;
             }
-            Ok(written as usize)
         }
+        Ok(written)
     }
 
     /// Blocks until all buffered audio has been played.
@@ -177,5 +188,76 @@ impl Drop for PcmPlayback<'_> {
         unsafe {
             (self.alsa.pcm_close)(self.pcm);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static WRITTEN: Mutex<Vec<i16>> = Mutex::new(Vec::new());
+
+    // Takes at most 100 stereo frames per call, as when a signal or an
+    // underrun cuts a write short.
+    unsafe extern "C" fn short_writei(
+        _: *mut SndPcm,
+        buf: *const c_void,
+        frames: c_ulong,
+    ) -> c_long {
+        let n = frames.min(100);
+        let samples = std::slice::from_raw_parts(buf as *const i16, n as usize * 2);
+        WRITTEN.lock().unwrap().extend_from_slice(samples);
+        n as c_long
+    }
+    unsafe extern "C" fn fake_open(
+        _: *mut *mut SndPcm,
+        _: *const c_char,
+        _: c_int,
+        _: c_int,
+    ) -> c_int {
+        -1
+    }
+    unsafe extern "C" fn fake_set_params(
+        _: *mut SndPcm,
+        _: c_int,
+        _: c_int,
+        _: c_uint,
+        _: c_uint,
+        _: c_int,
+        _: c_uint,
+    ) -> c_int {
+        -1
+    }
+    unsafe extern "C" fn fake_recover(_: *mut SndPcm, err: c_int, _: c_int) -> c_int {
+        err
+    }
+    unsafe extern "C" fn fake_int(_: *mut SndPcm) -> c_int {
+        0
+    }
+    unsafe extern "C" fn fake_strerror(_: c_int) -> *const c_char {
+        std::ptr::null()
+    }
+
+    #[test]
+    fn write_finishes_a_chunk_after_short_writes() {
+        let alsa = Alsa {
+            _lib: libloading::os::unix::Library::this().into(),
+            pcm_open: fake_open,
+            pcm_set_params: fake_set_params,
+            pcm_writei: short_writei,
+            pcm_recover: fake_recover,
+            pcm_drain: fake_int,
+            pcm_close: fake_int,
+            strerror: fake_strerror,
+        };
+        let pcm = PcmPlayback {
+            alsa: &alsa,
+            pcm: std::ptr::null_mut(),
+            channels: 2,
+        };
+        let samples: Vec<i16> = (0..2048 * 2).map(|i| i as i16).collect();
+        assert_eq!(pcm.write(&samples), Ok(2048));
+        assert_eq!(*WRITTEN.lock().unwrap(), samples);
     }
 }
