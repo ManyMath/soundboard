@@ -12,7 +12,7 @@
 
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 use libloading::Library;
@@ -47,6 +47,7 @@ type FnPcmPrepare = unsafe extern "C" fn(*mut PcmT) -> c_int;
 type FnPcmStart = unsafe extern "C" fn(*mut PcmT) -> c_int;
 type FnPcmDrop = unsafe extern "C" fn(*mut PcmT) -> c_int;
 type FnPcmReadi = unsafe extern "C" fn(*mut PcmT, *mut c_void, c_ulong) -> c_long;
+type FnPcmRecover = unsafe extern "C" fn(*mut PcmT, c_int, c_int) -> c_int;
 type FnStrError = unsafe extern "C" fn(c_int) -> *const c_char;
 
 /// Resolved entry points into `libasound.so.2`.
@@ -66,6 +67,7 @@ pub struct Alsa {
     pcm_start: FnPcmStart,
     pcm_drop: FnPcmDrop,
     pcm_readi: FnPcmReadi,
+    pcm_recover: FnPcmRecover,
     str_error: FnStrError,
 }
 
@@ -100,6 +102,7 @@ impl Alsa {
             let pcm_start = sym!(b"snd_pcm_start\0");
             let pcm_drop = sym!(b"snd_pcm_drop\0");
             let pcm_readi = sym!(b"snd_pcm_readi\0");
+            let pcm_recover = sym!(b"snd_pcm_recover\0");
             let str_error = sym!(b"snd_strerror\0");
 
             let alsa = Alsa {
@@ -117,6 +120,7 @@ impl Alsa {
                 pcm_start,
                 pcm_drop,
                 pcm_readi,
+                pcm_recover,
                 str_error,
                 _lib: lib,
             };
@@ -144,6 +148,9 @@ unsafe impl Send for PcmPtr {}
 pub struct AlsaCapture {
     alsa: Arc<Alsa>,
     samples: Arc<Mutex<Vec<i16>>>,
+    // Set by the reader thread when an error it cannot recover from ends
+    // capture.
+    error: Arc<OnceLock<String>>,
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
     channels: u32,
@@ -235,17 +242,20 @@ impl AlsaCapture {
             }
 
             let samples = Arc::new(Mutex::new(Vec::new()));
+            let error = Arc::new(OnceLock::new());
             let stop = Arc::new(AtomicBool::new(false));
             let reader = Self::spawn_reader(
                 alsa.clone(),
                 PcmPtr(pcm),
                 samples.clone(),
+                error.clone(),
                 stop.clone(),
                 channels,
             );
             Ok(AlsaCapture {
                 alsa: alsa.clone(),
                 samples,
+                error,
                 stop,
                 reader: Some(reader),
                 channels,
@@ -257,6 +267,7 @@ impl AlsaCapture {
         alsa: Arc<Alsa>,
         pcm: PcmPtr,
         samples: Arc<Mutex<Vec<i16>>>,
+        error: Arc<OnceLock<String>>,
         stop: Arc<AtomicBool>,
         channels: u32,
     ) -> JoinHandle<()> {
@@ -281,8 +292,15 @@ impl AlsaCapture {
                         s.extend_from_slice(&buf[..count]);
                     }
                 } else if n < 0 {
-                    // Negative is an error code; stop reading.
-                    break;
+                    // Overruns (-EPIPE) and suspends (-ESTRPIPE) are routine:
+                    // snd_pcm_recover re-prepares the stream and capture goes
+                    // on. Anything it cannot recover ends capture, and read()
+                    // reports why.
+                    let err = n as c_int;
+                    if unsafe { (alsa.pcm_recover)(pcm.0, err, 1) } < 0 {
+                        let _ = error.set(format!("snd_pcm_readi: {}", alsa.str_error(err)));
+                        break;
+                    }
                 }
                 // n == 0 means no data available; loop and retry.
             }
@@ -297,6 +315,12 @@ impl AlsaCapture {
 impl PcmSource for AlsaCapture {
     fn read(&self, max: usize) -> Result<Vec<i16>, String> {
         let mut samples = self.samples.lock().map_err(|e| e.to_string())?;
+        // Surface a capture error once everything captured before it is read.
+        if samples.is_empty() {
+            if let Some(e) = self.error.get() {
+                return Err(e.clone());
+            }
+        }
         if samples.is_empty() || max == 0 {
             return Ok(Vec::new());
         }
@@ -321,5 +345,127 @@ impl Drop for AlsaCapture {
         }
         // The reader thread stops/closes the PCM before exiting.
         let _ = &self.alsa;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
+
+    const EPIPE: c_int = 32;
+    const ENODEV: c_int = 19;
+
+    // Stands in for a PCM handle: readi replays `results` (frame counts or
+    // negative error codes) in order, then reports no data.
+    struct FakePcm {
+        results: Mutex<VecDeque<c_long>>,
+    }
+
+    unsafe extern "C" fn fake_readi(pcm: *mut PcmT, buf: *mut c_void, _: c_ulong) -> c_long {
+        let fake = &*(pcm as *const FakePcm);
+        let Some(n) = fake.results.lock().unwrap().pop_front() else {
+            std::thread::sleep(Duration::from_millis(1));
+            return 0;
+        };
+        if n > 0 {
+            std::slice::from_raw_parts_mut(buf as *mut i16, n as usize).fill(n as i16);
+        }
+        n
+    }
+
+    // Like snd_pcm_recover: an overrun is recoverable, anything else is not.
+    unsafe extern "C" fn fake_recover(_: *mut PcmT, err: c_int, _: c_int) -> c_int {
+        if err == -EPIPE {
+            0
+        } else {
+            err
+        }
+    }
+
+    unsafe extern "C" fn fake_ok(_: *mut PcmT) -> c_int {
+        0
+    }
+
+    unsafe extern "C" fn fake_strerror(_: c_int) -> *const c_char {
+        c"No such device".as_ptr()
+    }
+
+    /// Runs the reader thread over a scripted mono PCM. None when the host has
+    /// no libasound to borrow the remaining entry points from.
+    fn scripted(results: &[c_long]) -> Option<AlsaCapture> {
+        let mut alsa = match Alsa::load() {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("skipping: {e}");
+                return None;
+            }
+        };
+        alsa.pcm_readi = fake_readi;
+        alsa.pcm_recover = fake_recover;
+        alsa.pcm_drop = fake_ok;
+        alsa.pcm_close = fake_ok;
+        alsa.str_error = fake_strerror;
+        let alsa = Arc::new(alsa);
+        // Leaked so it outlives the reader thread.
+        let fake: &'static FakePcm = Box::leak(Box::new(FakePcm {
+            results: Mutex::new(results.iter().copied().collect()),
+        }));
+        let samples = Arc::default();
+        let error = Arc::default();
+        let stop = Arc::default();
+        let reader = AlsaCapture::spawn_reader(
+            alsa.clone(),
+            PcmPtr(fake as *const FakePcm as *mut PcmT),
+            Arc::clone(&samples),
+            Arc::clone(&error),
+            Arc::clone(&stop),
+            1,
+        );
+        Some(AlsaCapture {
+            alsa,
+            samples,
+            error,
+            stop,
+            reader: Some(reader),
+            channels: 1,
+        })
+    }
+
+    /// Reads until `want` samples arrive, read() fails, or two seconds pass.
+    fn read_until(cap: &AlsaCapture, want: usize) -> (Vec<i16>, Option<String>) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut got = Vec::new();
+        while got.len() < want && Instant::now() < deadline {
+            match cap.read(usize::MAX) {
+                Ok(s) => got.extend(s),
+                Err(e) => return (got, Some(e)),
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        (got, None)
+    }
+
+    #[test]
+    fn keeps_capturing_after_an_overrun() {
+        let Some(cap) = scripted(&[3, -EPIPE as c_long, 2]) else {
+            return;
+        };
+        let (got, err) = read_until(&cap, 5);
+        assert_eq!(err, None);
+        assert_eq!(got, [3, 3, 3, 2, 2]);
+    }
+
+    #[test]
+    fn reports_a_fatal_error_after_the_samples_before_it() {
+        let Some(cap) = scripted(&[3, -ENODEV as c_long]) else {
+            return;
+        };
+        let (got, err) = read_until(&cap, usize::MAX);
+        assert_eq!(got, [3, 3, 3]);
+        assert_eq!(err.as_deref(), Some("snd_pcm_readi: No such device"));
+        // The error sticks, so every later poll sees it too.
+        assert!(cap.read(16).is_err());
     }
 }
