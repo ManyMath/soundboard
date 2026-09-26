@@ -140,6 +140,23 @@ void main() {
         final wav = await recording.stop(); // no throw
         expect(_ascii(wav, 0, 4), 'RIFF');
       });
+
+      test('stop releases the native recording', () async {
+        final backend = FfiBackend();
+        Microphone.registerBackend(backend, makeActive: true);
+        final first = await Microphone.record();
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        await first.stop();
+        // A fresh recorder hands out the same ids again, so a handle `first`
+        // still held would now belong to `second`.
+        await backend.dispose();
+        final second = await Microphone.record();
+        await first.dispose();
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        expect(second.pcm, isNotEmpty);
+        await second.stop();
+        await second.dispose();
+      });
     },
     skip: available ? false : 'microphone library not built',
   );

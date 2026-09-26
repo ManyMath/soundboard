@@ -317,7 +317,7 @@ class FfiRecording implements Recording {
       StreamController<Uint8List>.broadcast();
 
   int _id = 0;
-  late final Pointer<Int16> _buf;
+  Pointer<Int16> _buf = nullptr;
   Timer? _poll;
   RecordingState _state = RecordingState.idle;
   Uint8List? _finalWav;
@@ -382,6 +382,20 @@ class FfiRecording implements Recording {
     _poll = null;
   }
 
+  /// Frees the native recording (closing the capture device) and the read
+  /// buffer. Safe to call more than once.
+  void _release() {
+    _stopPolling();
+    if (_id != 0) {
+      _b.recordingFree(_recorder, _id);
+      _id = 0;
+    }
+    if (_buf != nullptr) {
+      malloc.free(_buf);
+      _buf = nullptr;
+    }
+  }
+
   @override
   Future<void> pause() async {
     // The native side discards captured input while paused, so the paused
@@ -412,6 +426,9 @@ class FfiRecording implements Recording {
       // Final drain of anything captured since the last poll.
       _drain();
     }
+    // microphone_stop only flags the recording; the device stays open until
+    // the recording is freed, so free it now rather than waiting for dispose.
+    _release();
     _state = RecordingState.stopped;
     if (!_frames.isClosed) await _frames.close();
     return _finalWav = wavFromPcm(_pcm.toBytes(), _format);
@@ -426,14 +443,7 @@ class FfiRecording implements Recording {
 
   @override
   Future<void> dispose() async {
-    _stopPolling();
-    if (_id != 0) {
-      _b.recordingFree(_recorder, _id);
-      _id = 0;
-    }
-    if (_state != RecordingState.disposed) {
-      malloc.free(_buf);
-    }
+    _release();
     _state = RecordingState.disposed;
     if (!_frames.isClosed) await _frames.close();
   }
