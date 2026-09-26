@@ -12,7 +12,7 @@
 
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 use libloading::Library;
@@ -23,6 +23,7 @@ use crate::PcmSource;
 const AAUDIO_DIRECTION_INPUT: c_int = 1;
 const AAUDIO_FORMAT_PCM_I16: c_int = 1;
 const AAUDIO_OK: c_int = 0;
+const AAUDIO_ERROR_TIMEOUT: c_int = -885;
 
 type Builder = c_void;
 type Stream = c_void;
@@ -109,6 +110,8 @@ unsafe impl Send for StreamPtr {}
 pub struct AaudioCapture {
     aaudio: Arc<Aaudio>,
     samples: Arc<Mutex<Vec<i16>>>,
+    // Set by the reader thread when a read error ends capture.
+    error: Arc<OnceLock<String>>,
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
     channels: u32,
@@ -149,17 +152,20 @@ impl AaudioCapture {
             }
 
             let samples = Arc::new(Mutex::new(Vec::new()));
+            let error = Arc::new(OnceLock::new());
             let stop = Arc::new(AtomicBool::new(false));
             let reader = Self::spawn_reader(
                 aaudio.clone(),
                 StreamPtr(stream),
                 samples.clone(),
+                error.clone(),
                 stop.clone(),
                 actual_channels,
             );
             Ok(AaudioCapture {
                 aaudio: aaudio.clone(),
                 samples,
+                error,
                 stop,
                 reader: Some(reader),
                 channels: actual_channels,
@@ -171,6 +177,7 @@ impl AaudioCapture {
         aaudio: Arc<Aaudio>,
         stream: StreamPtr,
         samples: Arc<Mutex<Vec<i16>>>,
+        error: Arc<OnceLock<String>>,
         stop: Arc<AtomicBool>,
         channels: u32,
     ) -> JoinHandle<()> {
@@ -195,11 +202,13 @@ impl AaudioCapture {
                     if let Ok(mut s) = samples.lock() {
                         s.extend_from_slice(&buf[..count]);
                     }
-                } else if n < 0 {
-                    // Negative is an error code; stop reading.
+                } else if n < 0 && n != AAUDIO_ERROR_TIMEOUT {
+                    // Anything but a timeout (e.g. the device was
+                    // disconnected) ends capture, and read() reports why.
+                    let _ = error.set(format!("AAudioStream_read: {}", aaudio.result_text(n)));
                     break;
                 }
-                // n == 0 means timeout with no data; loop and check stop.
+                // 0 or a timeout means no data yet; loop and check stop.
             }
             unsafe {
                 (aaudio.stream_stop)(stream.0);
@@ -212,6 +221,12 @@ impl AaudioCapture {
 impl PcmSource for AaudioCapture {
     fn read(&self, max: usize) -> Result<Vec<i16>, String> {
         let mut samples = self.samples.lock().map_err(|e| e.to_string())?;
+        // Surface a capture error once everything captured before it is read.
+        if samples.is_empty() {
+            if let Some(e) = self.error.get() {
+                return Err(e.clone());
+            }
+        }
         if samples.is_empty() || max == 0 {
             return Ok(Vec::new());
         }
