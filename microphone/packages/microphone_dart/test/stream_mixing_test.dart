@@ -259,5 +259,28 @@ void main() {
       await primary.close();
       await other.close();
     });
+
+    test('a failed start stops the sources already started', () async {
+      final first = SilentBackend(chunk: const Duration(milliseconds: 10));
+      final mixing = MixingCaptureBackend([
+        first,
+        _FailingBackend(),
+      ], format: _fmt);
+
+      await expectLater(
+        mixing.startRecording(),
+        throwsA(isA<PermissionDeniedException>()),
+      );
+      expect(first.started.single.state, RecordingState.disposed);
+    });
   });
+}
+
+class _FailingBackend extends SilentBackend {
+  @override
+  Future<Recording> startRecording({
+    CaptureFormat format = const CaptureFormat(),
+    String? deviceId,
+    bool retainPcm = true,
+  }) async => throw const PermissionDeniedException();
 }

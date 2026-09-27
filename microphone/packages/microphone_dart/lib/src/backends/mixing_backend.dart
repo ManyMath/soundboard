@@ -102,19 +102,32 @@ class MixingCaptureBackend extends CaptureBackend {
     bool retainPcm = true,
   }) async {
     final children = <Recording>[];
-    for (var i = 0; i < _sources.length; i++) {
-      final s = _sources[i];
-      await s.initialize();
-      // The children only feed the mix through their frames; their own
-      // accumulated PCM is never read, so never retain it. [deviceId] selects
-      // the input of the primary (the microphone), where it is meaningful.
-      children.add(
-        await s.startRecording(
-          format: this.format,
-          deviceId: i == _primary ? deviceId : null,
-          retainPcm: false,
-        ),
-      );
+    try {
+      for (var i = 0; i < _sources.length; i++) {
+        final s = _sources[i];
+        await s.initialize();
+        // The children only feed the mix through their frames; their own
+        // accumulated PCM is never read, so never retain it. [deviceId]
+        // selects the input of the primary (the microphone), where it is
+        // meaningful.
+        children.add(
+          await s.startRecording(
+            format: this.format,
+            deviceId: i == _primary ? deviceId : null,
+            retainPcm: false,
+          ),
+        );
+      }
+    } on Object {
+      // Nothing will own the sources that did start, so stop them here.
+      for (final c in children) {
+        try {
+          await c.dispose();
+        } on Object {
+          // Keep the original failure.
+        }
+      }
+      rethrow;
     }
     return MixingRecording(
       children,
