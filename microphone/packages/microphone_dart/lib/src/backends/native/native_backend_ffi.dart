@@ -173,6 +173,8 @@ class _Bindings {
 class FfiBackend extends CaptureBackend {
   _Bindings? _bindings;
   Pointer<Void> _recorder = nullptr;
+  // Recordings still holding a native id on _recorder.
+  final Set<FfiRecording> _live = {};
   bool _available = false;
   bool _probed = false;
 
@@ -263,11 +265,24 @@ class FfiBackend extends CaptureBackend {
     bool retainPcm = true,
   }) async {
     if (_recorder == nullptr) await initialize();
-    return FfiRecording._(this, format, deviceId, retainPcm: retainPcm);
+    final recording = FfiRecording._(
+      this,
+      format,
+      deviceId,
+      retainPcm: retainPcm,
+    );
+    _live.add(recording);
+    return recording;
   }
 
+  /// Frees the native recorder, disposing any recording still running on it.
   @override
   Future<void> dispose() async {
+    // Their ids belong to this recorder; left alive they would keep polling
+    // a freed recorder, then alias the next recorder's ids after re-init.
+    for (final recording in _live.toList()) {
+      await recording.dispose();
+    }
     if (_recorder != nullptr) {
       _bindings!.recorderFree(_recorder);
       _recorder = nullptr;
@@ -396,6 +411,7 @@ class FfiRecording implements Recording {
       _b.recordingFree(_recorder, _id);
       _id = 0;
     }
+    _backend._live.remove(this);
     if (_buf != nullptr) {
       malloc.free(_buf);
       _buf = nullptr;

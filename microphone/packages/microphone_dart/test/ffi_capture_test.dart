@@ -174,6 +174,18 @@ void main() {
         expect(recording.duration.inMilliseconds, greaterThan(elapsed * 0.8));
         await recording.dispose();
       });
+
+      test('disposing the backend disposes its live recordings', () async {
+        final backend = FfiBackend();
+        Microphone.registerBackend(backend, makeActive: true);
+        final recording = await Microphone.record();
+        var closed = false;
+        recording.frames.listen(null, onDone: () => closed = true);
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        await backend.dispose();
+        expect(recording.state, RecordingState.disposed);
+        expect(closed, isTrue);
+      });
     },
     skip: available ? false : 'microphone library not built',
   );
