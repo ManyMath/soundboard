@@ -157,6 +157,23 @@ void main() {
         await second.stop();
         await second.dispose();
       });
+
+      test('a stalled isolate loses no audio', () async {
+        Microphone.registerBackend(FfiBackend(), makeActive: true);
+        final recording = await Microphone.record(
+          format: const CaptureFormat(sampleRate: 44100, channels: 1),
+        );
+        final clock = Stopwatch()..start();
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        // Block the event loop for well over one read buffer's worth of audio
+        // (16384 samples is ~370 ms here), so no poll runs meanwhile.
+        while (clock.elapsedMilliseconds < 1100) {}
+        final elapsed = clock.elapsedMilliseconds;
+        await recording.stop();
+        // Leave room for device start-up latency, not for a dropped backlog.
+        expect(recording.duration.inMilliseconds, greaterThan(elapsed * 0.8));
+        await recording.dispose();
+      });
     },
     skip: available ? false : 'microphone library not built',
   );

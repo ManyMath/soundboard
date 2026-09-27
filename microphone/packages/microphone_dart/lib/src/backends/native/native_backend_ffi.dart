@@ -301,7 +301,7 @@ class FfiRecording implements Recording {
     );
     _state = RecordingState.recording;
     // 16384 samples is generous headroom over the ~2205 samples produced per
-    // 50 ms at 44.1 kHz mono, so a poll never leaves much behind.
+    // 50 ms at 44.1 kHz mono; _drain reads again when a stall fills it.
     _buf = malloc<Int16>(_readCap);
     _poll = Timer.periodic(const Duration(milliseconds: 50), (_) => _drain());
   }
@@ -363,18 +363,24 @@ class FfiRecording implements Recording {
       }
       return;
     }
-    final n = _b.read(_recorder, _id, _buf, _readCap);
-    if (n <= 0) return;
-    // Copy the n captured Int16 samples out of native memory as raw S16LE
-    // bytes. _buf.asTypedList is a view over native memory that the next poll
-    // overwrites, so we make a private copy. The samples are LE on every
-    // platform we target.
-    final view = _buf.asTypedList(n); // Int16List over native memory
-    final bytes = Uint8List(n * 2)
-      ..setRange(0, n * 2, view.buffer.asUint8List(view.offsetInBytes, n * 2));
-    _pcmBytes += bytes.length;
-    if (_retainPcm) _pcm.add(bytes);
-    if (!_frames.isClosed) _frames.add(bytes);
+    // After an isolate stall (GC, a long frame) more than one buffer's worth
+    // can be queued natively, so keep reading until a read comes up short.
+    int n;
+    do {
+      n = _b.read(_recorder, _id, _buf, _readCap);
+      if (n <= 0) return;
+      // Copy the n captured Int16 samples out of native memory as raw S16LE
+      // bytes. _buf.asTypedList is a view over native memory that the next
+      // read overwrites, so we make a private copy. The samples are LE on
+      // every platform we target.
+      final view = _buf.asTypedList(n); // Int16List over native memory
+      final bytes = Uint8List.fromList(
+        view.buffer.asUint8List(view.offsetInBytes, n * 2),
+      );
+      _pcmBytes += bytes.length;
+      if (_retainPcm) _pcm.add(bytes);
+      if (!_frames.isClosed) _frames.add(bytes);
+    } while (n == _readCap);
   }
 
   void _stopPolling() {
