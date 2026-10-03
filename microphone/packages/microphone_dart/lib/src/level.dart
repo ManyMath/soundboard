@@ -34,24 +34,26 @@ class AudioLevel {
   /// Computes the level of one chunk of interleaved S16LE PCM.
   ///
   /// All channels are considered together. Returns [silent] for an empty chunk.
+  /// A trailing odd byte (half a sample) is ignored.
   factory AudioLevel.fromPcm(Uint8List pcm, CaptureFormat format) {
     assert(
       format.sampleFormat == SampleFormat.int16,
       'only int16 PCM is supported',
     );
-    final samples = Int16List.sublistView(
-      pcm.buffer.asUint8List(pcm.offsetInBytes, pcm.length),
-    );
-    if (samples.isEmpty) return silent;
+    // ByteData rather than an Int16List view: the chunk may start at an odd
+    // offset in its buffer, or end mid-sample.
+    final view = ByteData.sublistView(pcm);
+    final count = pcm.length >> 1;
+    if (count == 0) return silent;
     var sumSquares = 0.0;
     var peak = 0.0;
-    for (final s in samples) {
-      final n = s / 32768.0;
+    for (var i = 0; i < count; i++) {
+      final n = view.getInt16(i << 1, Endian.little) / 32768.0;
       sumSquares += n * n;
       final a = n.abs();
       if (a > peak) peak = a;
     }
-    final rms = math.sqrt(sumSquares / samples.length);
+    final rms = math.sqrt(sumSquares / count);
     return AudioLevel(rms: rms.clamp(0, 1), peak: peak.clamp(0, 1));
   }
 

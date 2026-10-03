@@ -47,6 +47,23 @@ void main() {
       final level = AudioLevel.fromPcm(pcm([16384, -16384]), format);
       expect(level.peakDbfs, closeTo(-6.02, 0.1));
     });
+
+    test('ignores a trailing half sample', () {
+      final chunk = Uint8List.fromList([
+        ...pcm([16384, -16384]),
+        0x7f,
+      ]);
+      final level = AudioLevel.fromPcm(chunk, format);
+      expect(level.peakDbfs, closeTo(-6.02, 0.1));
+      expect(level.rmsDbfs, closeTo(-6.02, 0.1));
+    });
+
+    test('reads a chunk at an odd offset in its buffer', () {
+      final backing = Uint8List(5)..setRange(1, 5, pcm([16384, -16384]));
+      final chunk = Uint8List.sublistView(backing, 1);
+      final level = AudioLevel.fromPcm(chunk, format);
+      expect(level.peakDbfs, closeTo(-6.02, 0.1));
+    });
   });
 
   group('RecordingLevels.levels', () {
