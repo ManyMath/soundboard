@@ -1,11 +1,14 @@
 import 'dart:typed_data';
 
 import 'capture_format.dart';
+import 'exceptions.dart';
 
 /// Wraps raw interleaved PCM [pcm] in a canonical 44-byte WAV (RIFF) header.
 ///
 /// [format] must match how the PCM was captured. Only [SampleFormat.int16] is
-/// supported, so the header is always 16-bit integer PCM.
+/// supported, so the header is always 16-bit integer PCM. Throws a
+/// [MicrophoneException] if [pcm] is too large for WAV's 32-bit sizes (about
+/// 4 GiB).
 Uint8List wavFromPcm(Uint8List pcm, CaptureFormat format) {
   assert(
     format.sampleFormat == SampleFormat.int16,
@@ -15,8 +18,16 @@ Uint8List wavFromPcm(Uint8List pcm, CaptureFormat format) {
   final blockAlign = format.bytesPerFrame;
   final byteRate = format.bytesPerSecond;
   final dataBytes = pcm.length;
+  // RIFF chunks are padded to an even size; the pad is not counted as data.
+  final pad = dataBytes & 1;
+  final riffBytes = 36 + dataBytes + pad;
+  if (riffBytes > 0xFFFFFFFF) {
+    throw MicrophoneException(
+      'PCM of $dataBytes bytes is too large for a WAV file (4 GiB limit)',
+    );
+  }
 
-  final out = Uint8List(44 + dataBytes);
+  final out = Uint8List(44 + dataBytes + pad);
   final view = ByteData.sublistView(out);
   var o = 0;
 
@@ -37,7 +48,7 @@ Uint8List wavFromPcm(Uint8List pcm, CaptureFormat format) {
   }
 
   ascii('RIFF');
-  u32(36 + dataBytes); // file size minus the 8-byte RIFF/size prefix
+  u32(riffBytes); // file size minus the 8-byte RIFF/size prefix
   ascii('WAVE');
   ascii('fmt ');
   u32(16); // PCM fmt chunk size

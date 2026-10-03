@@ -222,6 +222,18 @@ void main() {
       expect(view.getUint32(4, Endian.little), 36 + 100); // RIFF size
       expect(view.getUint32(40, Endian.little), 100); // data size
     });
+
+    test('pads odd-sized data to an even chunk', () {
+      final wav = wavFromPcm(
+        Uint8List.fromList([1, 2, 3]),
+        const CaptureFormat(),
+      );
+      expect(wav.length, 48);
+      expect(wav.sublist(44), [1, 2, 3, 0]);
+      final view = ByteData.sublistView(wav);
+      expect(view.getUint32(4, Endian.little), 36 + 4); // RIFF size, padded
+      expect(view.getUint32(40, Endian.little), 3); // data size, unpadded
+    });
   });
 }
 
