@@ -7,6 +7,7 @@ import '../capture_format.dart';
 import '../file_writer.dart';
 import '../recording.dart';
 import '../wav.dart';
+import 'sample_aligner.dart';
 
 /// A capture backend fed by an external stream of PCM frames.
 ///
@@ -90,6 +91,7 @@ class StreamRecording implements Recording {
   final StreamController<Uint8List> _frames =
       StreamController<Uint8List>.broadcast();
 
+  final SampleAligner _aligner = SampleAligner();
   StreamSubscription<Uint8List>? _sub;
   RecordingState _state = RecordingState.idle;
   Uint8List? _finalWav;
@@ -119,10 +121,14 @@ class StreamRecording implements Recording {
   }
 
   void _onData(Uint8List chunk) {
+    // Align before the pause check, so dropping a chunk cannot shift the
+    // samples after it.
+    final samples = _aligner.align(chunk);
     if (_state != RecordingState.recording) return; // dropped while paused
-    _pcmBytes += chunk.length;
-    if (_retainPcm) _pcm.add(chunk);
-    if (!_frames.isClosed) _frames.add(chunk);
+    if (samples.isEmpty) return;
+    _pcmBytes += samples.length;
+    if (_retainPcm) _pcm.add(samples);
+    if (!_frames.isClosed) _frames.add(samples);
   }
 
   void _onError(Object error, StackTrace stack) {

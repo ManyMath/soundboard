@@ -7,6 +7,7 @@ import '../capture_format.dart';
 import '../file_writer.dart';
 import '../recording.dart';
 import '../wav.dart';
+import 'sample_aligner.dart';
 
 /// A capture backend that sums several capture sources into one stream.
 ///
@@ -175,6 +176,7 @@ class MixingRecording implements Recording {
   final int _primary;
   final bool _retainPcm;
 
+  final SampleAligner _primaryAligner = SampleAligner();
   final List<BytesBuilder> _buffers = [];
   final List<StreamSubscription<Uint8List>> _subs = [];
   final BytesBuilder _pcm = BytesBuilder(copy: false);
@@ -212,8 +214,11 @@ class MixingRecording implements Recording {
   void _onData(int i, Uint8List chunk) {
     if (_state == RecordingState.disposed) return;
     if (i == _primary) {
+      // Align before the pause check, so dropping a chunk cannot shift the
+      // samples after it.
+      final samples = _primaryAligner.align(chunk);
       if (_state != RecordingState.recording) return; // dropped while paused
-      _emit(chunk);
+      _emit(samples);
     } else {
       _buffers[i].add(chunk);
     }
@@ -256,15 +261,17 @@ class MixingRecording implements Recording {
     }
   }
 
-  /// Removes and returns up to [n] bytes from the front of [bb], keeping the
-  /// remainder buffered for the next chunk.
+  /// Removes and returns up to [n] bytes of whole samples from the front of
+  /// [bb], keeping the remainder buffered for the next chunk.
   static Uint8List _takeFront(BytesBuilder bb, int n) {
     if (bb.isEmpty) return _empty;
     final all = bb.toBytes();
     bb.clear();
-    if (n >= all.length) return all;
-    bb.add(Uint8List.sublistView(all, n));
-    return Uint8List.sublistView(all, 0, n);
+    // Never split a sample: a trailing odd byte waits for its other half.
+    final take = (n < all.length ? n : all.length) & ~1;
+    if (take == all.length) return all;
+    bb.add(Uint8List.sublistView(all, take));
+    return Uint8List.sublistView(all, 0, take);
   }
 
   void _onError(Object error, StackTrace stack) {

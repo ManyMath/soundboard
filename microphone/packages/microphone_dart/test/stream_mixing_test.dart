@@ -105,6 +105,43 @@ void main() {
       expect(closed, isTrue);
       expect(rec.state, RecordingState.stopped);
     });
+
+    test('re-cuts chunks split mid-sample on sample boundaries', () async {
+      final ctrl = StreamController<Uint8List>();
+      final backend = StreamCaptureBackend(source: ctrl.stream, format: _fmt);
+      final rec = await backend.startRecording();
+      final received = <int>[];
+      final sub = rec.frames.listen((c) => received.addAll(samples16(c)));
+
+      final all = pcm16([100, 200, 300, 400]);
+      ctrl.add(Uint8List.sublistView(all, 0, 3));
+      ctrl.add(Uint8List.sublistView(all, 3));
+      await pump();
+
+      expect(received, [100, 200, 300, 400]);
+      await sub.cancel();
+      await ctrl.close();
+    });
+
+    test('a split chunk dropped while paused keeps alignment', () async {
+      final ctrl = StreamController<Uint8List>();
+      final backend = StreamCaptureBackend(source: ctrl.stream, format: _fmt);
+      final rec = await backend.startRecording();
+
+      final all = pcm16([1, 2, 3, 4, 5, 6]);
+      ctrl.add(Uint8List.sublistView(all, 0, 3));
+      await pump();
+      await rec.pause();
+      ctrl.add(Uint8List.sublistView(all, 3, 8)); // dropped
+      await pump();
+      await rec.resume();
+      ctrl.add(Uint8List.sublistView(all, 8));
+      await pump();
+
+      expect(samples16(rec.pcm), [1, 5, 6]);
+      await rec.stop();
+      await ctrl.close();
+    });
   });
 
   group('MixingCaptureBackend', () {
@@ -189,6 +226,46 @@ void main() {
       await pump();
 
       expect(samples16(rec.pcm), [1001, 2, 3]);
+      await rec.stop();
+      await primary.close();
+      await other.close();
+    });
+
+    test('a primary split mid-sample stays aligned', () async {
+      final primary = StreamController<Uint8List>();
+      final mixing = MixingCaptureBackend([source(primary)], format: _fmt);
+      final rec = await mixing.startRecording();
+
+      final all = pcm16([100, 200, 300, 400]);
+      primary.add(Uint8List.sublistView(all, 0, 3));
+      primary.add(Uint8List.sublistView(all, 3));
+      await pump();
+
+      expect(samples16(rec.pcm), [100, 200, 300, 400]);
+      await rec.stop();
+      await primary.close();
+    });
+
+    test('a secondary buffered mid-sample keeps its half sample', () async {
+      final primary = StreamController<Uint8List>();
+      final other = StreamController<Uint8List>();
+      final mixing = MixingCaptureBackend([
+        source(primary),
+        source(other),
+      ], format: _fmt);
+      final rec = await mixing.startRecording();
+
+      final tail = pcm16([1000, 2000]);
+      other.add(Uint8List.sublistView(tail, 0, 3));
+      await pump();
+      primary.add(pcm16([1, 2]));
+      await pump();
+      other.add(Uint8List.sublistView(tail, 3));
+      await pump();
+      primary.add(pcm16([1, 2]));
+      await pump();
+
+      expect(samples16(rec.pcm), [1001, 2, 2001, 2]);
       await rec.stop();
       await primary.close();
       await other.close();
