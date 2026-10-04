@@ -8,13 +8,15 @@
 //! extra.
 //!
 //! The `waveIn` API is callback-driven; `PcmSource` is pull-driven. We bridge
-//! them exactly like the CoreAudio path: the input callback appends each full
-//! buffer's S16 frames to a `Mutex<Vec<i16>>` and re-queues the buffer, and
-//! `read` drains whatever has accumulated.
+//! them much like the CoreAudio path: the input callback appends each full
+//! buffer's S16 frames to a `Mutex<Vec<i16>>`, and `read` drains whatever has
+//! accumulated. The callback may not call wave functions itself, so it hands
+//! each buffer to a recycler thread that re-queues it.
 
 use std::os::raw::{c_char, c_void};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 use libloading::Library;
 
@@ -165,13 +167,12 @@ fn utf16_to_string(units: &[u16]) -> String {
 }
 
 /// Passed to waveInOpen as the callback instance. Holds the captured-sample
-/// sink and the add-buffer entry point the callback needs to recycle buffers.
+/// sink and the channel that hands returned buffers to the recycler thread.
 struct Sink {
     samples: Mutex<Vec<i16>>,
-    add_buffer: FnHdrOp,
-    // Once set, the callback drains a returned buffer but does not re-queue it,
-    // so waveInReset/waveInClose during teardown can drain the queue.
-    closing: AtomicBool,
+    // (HWAVEIN, *mut WAVEHDR) per filled buffer; a null header stops the
+    // recycler.
+    filled: Sender<(usize, usize)>,
 }
 
 unsafe impl Send for Sink {}
@@ -182,6 +183,7 @@ pub struct WinmmCapture {
     winmm: *const Winmm,
     hwi: HWaveIn,
     sink: Arc<Sink>,
+    recycler: Option<JoinHandle<()>>,
     // Boxed so each WAVEHDR keeps a stable heap address: we hand the OS raw
     // pointers to them (waveInPrepareHeader/AddBuffer) and it retains those
     // across later pushes, which would reallocate and move a plain Vec's
@@ -194,9 +196,10 @@ pub struct WinmmCapture {
     channels: u32,
 }
 
-// The handle and headers are only touched from the owning capture thread and
-// the waveIn callback thread (which the OS serializes per device); the shared
-// sample buffer is behind a Mutex.
+// The handle and headers are only touched from the owning capture thread, the
+// waveIn callback thread (which the OS serializes per device) and the recycler
+// thread, which teardown joins before resetting the device; the shared sample
+// buffer is behind a Mutex.
 unsafe impl Send for WinmmCapture {}
 unsafe impl Sync for WinmmCapture {}
 
@@ -230,11 +233,13 @@ impl WinmmCapture {
             None => WAVE_MAPPER,
         };
 
+        let (filled, returned) = mpsc::channel();
         let sink = Arc::new(Sink {
             samples: Mutex::new(Vec::new()),
-            add_buffer: winmm.add_buffer,
-            closing: AtomicBool::new(false),
+            filled,
         });
+        // Exits on its own if waveInOpen fails and `sink` is dropped.
+        let mut recycler = Some(spawn_recycler(winmm.add_buffer, returned));
 
         unsafe {
             let mut hwi: HWaveIn = std::ptr::null_mut();
@@ -268,13 +273,13 @@ impl WinmmCapture {
                 });
                 let rc = (winmm.prepare)(hwi, &mut *hdr, hdr_size);
                 if rc != MMSYSERR_NOERROR {
-                    Self::teardown(winmm, hwi, &sink, &mut headers);
+                    Self::teardown(winmm, hwi, &sink, &mut recycler, &mut headers);
                     return Err(format!("waveInPrepareHeader: {}", winmm.error_text(rc)));
                 }
                 let rc = (winmm.add_buffer)(hwi, &mut *hdr, hdr_size);
                 if rc != MMSYSERR_NOERROR {
                     (winmm.unprepare)(hwi, &mut *hdr, hdr_size);
-                    Self::teardown(winmm, hwi, &sink, &mut headers);
+                    Self::teardown(winmm, hwi, &sink, &mut recycler, &mut headers);
                     return Err(format!("waveInAddBuffer: {}", winmm.error_text(rc)));
                 }
                 // Push only after the header is queued; the Vec move keeps the
@@ -285,7 +290,7 @@ impl WinmmCapture {
 
             let rc = (winmm.start)(hwi);
             if rc != MMSYSERR_NOERROR {
-                Self::teardown(winmm, hwi, &sink, &mut headers);
+                Self::teardown(winmm, hwi, &sink, &mut recycler, &mut headers);
                 return Err(format!("waveInStart: {}", winmm.error_text(rc)));
             }
 
@@ -293,6 +298,7 @@ impl WinmmCapture {
                 winmm: winmm as *const Winmm,
                 hwi,
                 sink,
+                recycler,
                 headers,
                 _buffers: buffers,
                 channels,
@@ -301,21 +307,26 @@ impl WinmmCapture {
     }
 
     /// Stops the device and releases every prepared header. Used both for the
-    /// error path during open and from Drop. `closing` must already be set so
-    /// the callback drains rather than re-queues the buffers waveInReset
-    /// returns.
+    /// error path during open and from Drop.
     #[allow(clippy::vec_box)] // see the `headers` field: stable WAVEHDR addresses.
     unsafe fn teardown(
         winmm: &Winmm,
         hwi: HWaveIn,
         sink: &Arc<Sink>,
+        recycler: &mut Option<JoinHandle<()>>,
         headers: &mut Vec<Box<WaveHdr>>,
     ) {
-        sink.closing.store(true, Ordering::SeqCst);
+        // Stop the recycler first. Once it has exited nothing can re-queue a
+        // buffer behind waveInReset, so every header comes back and can be
+        // unprepared.
+        let _ = sink.filled.send((0, 0));
+        if let Some(h) = recycler.take() {
+            let _ = h.join();
+        }
         let hdr_size = std::mem::size_of::<WaveHdr>() as u32;
         (winmm.stop)(hwi);
-        // Returns all queued buffers to the callback (which, now closing, just
-        // drains them) so the headers can be unprepared.
+        // Returns all queued buffers to the callback, whose hand-offs now go
+        // nowhere, so the headers can be unprepared.
         (winmm.reset)(hwi);
         for hdr in headers.iter_mut() {
             (winmm.unprepare)(hwi, &mut **hdr, hdr_size);
@@ -351,12 +362,28 @@ unsafe extern "system" fn input_cb(
             samples.extend_from_slice(slice);
         }
     }
-    // Recycle the buffer so the device keeps capturing -- unless we are tearing
-    // down, in which case the queue must drain. waveInAddBuffer is one of the
-    // few functions documented as safe to call from this callback.
-    if !sink.closing.load(Ordering::SeqCst) {
-        (sink.add_buffer)(hwi, hdr, std::mem::size_of::<WaveHdr>() as u32);
-    }
+    // Recycle the buffer so the device keeps capturing. waveInProc must not
+    // call other wave functions (Microsoft documents that it can deadlock),
+    // so the recycler thread calls waveInAddBuffer instead.
+    let _ = sink.filled.send((hwi as usize, hdr as usize));
+}
+
+/// Re-queues each buffer the callback hands over, until told to stop.
+fn spawn_recycler(add_buffer: FnHdrOp, filled: Receiver<(usize, usize)>) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        while let Ok((hwi, hdr)) = filled.recv() {
+            if hdr == 0 {
+                break;
+            }
+            unsafe {
+                add_buffer(
+                    hwi as HWaveIn,
+                    hdr as *mut WaveHdr,
+                    std::mem::size_of::<WaveHdr>() as u32,
+                );
+            }
+        }
+    })
 }
 
 impl PcmSource for WinmmCapture {
@@ -383,7 +410,13 @@ impl Drop for WinmmCapture {
     fn drop(&mut self) {
         unsafe {
             let winmm = &*self.winmm;
-            Self::teardown(winmm, self.hwi, &self.sink, &mut self.headers);
+            Self::teardown(
+                winmm,
+                self.hwi,
+                &self.sink,
+                &mut self.recycler,
+                &mut self.headers,
+            );
         }
         // Keep the Sink alive until after the device is closed so the callback
         // cannot deref a freed pointer mid-stop.
