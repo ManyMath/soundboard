@@ -24,3 +24,7 @@
 - Configurable sample rate / channels honored where the platform supports it
   (macOS verified for 8/16/44.1/48 kHz, mono and stereo); resample policy
   documented on `CaptureFormat`.
+- `Microphone.permissionDelegate` (`MicrophonePermissionDelegate`) lets a host
+  supply platform permission checks to the FFI backend, which otherwise
+  reports permission as granted. `microphone_flutter` uses it for Android's
+  runtime `RECORD_AUDIO` permission.

@@ -15,5 +15,6 @@ export 'src/capture_format.dart';
 export 'src/exceptions.dart';
 export 'src/level.dart';
 export 'src/microphone.dart';
+export 'src/permission_delegate.dart';
 export 'src/recording.dart';
 export 'src/wav.dart';

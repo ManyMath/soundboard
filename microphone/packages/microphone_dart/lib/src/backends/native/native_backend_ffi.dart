@@ -10,6 +10,7 @@ import '../../capture_device.dart';
 import '../../capture_format.dart';
 import '../../exceptions.dart';
 import '../../file_writer.dart';
+import '../../microphone.dart';
 import '../../recording.dart';
 import '../../wav.dart';
 
@@ -218,15 +219,17 @@ class FfiBackend extends CaptureBackend {
     return ptr == nullptr ? 'unknown error' : ptr.toDartString();
   }
 
-  // The OS gates microphone access at capture time (e.g. the macOS TCC prompt
-  // on first use); there is no portable pure-Dart permission API, so report
-  // true and let capture surface a denial. Flutter layers a real permission
-  // check on top via microphone_flutter.
+  // There is no portable pure-Dart permission API. Where the OS gates access
+  // at capture time (e.g. the macOS TCC prompt on first use) report true and
+  // let capture surface a denial; a host that can ask the platform (Android's
+  // runtime RECORD_AUDIO, via microphone_flutter) installs a delegate instead.
   @override
-  Future<bool> hasPermission() async => true;
+  Future<bool> hasPermission() async =>
+      await Microphone.permissionDelegate?.hasPermission() ?? true;
 
   @override
-  Future<bool> requestPermission() async => true;
+  Future<bool> requestPermission() async =>
+      await Microphone.permissionDelegate?.requestPermission() ?? true;
 
   @override
   Future<List<CaptureDevice>> devices() async {

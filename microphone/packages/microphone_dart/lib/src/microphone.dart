@@ -4,6 +4,7 @@ import 'capture_backend.dart';
 import 'capture_device.dart';
 import 'capture_format.dart';
 import 'exceptions.dart';
+import 'permission_delegate.dart';
 import 'recording.dart';
 
 /// Entry point for recording audio.
@@ -28,6 +29,14 @@ class Microphone {
   // priority-selected; a pinned backend survives later registrations.
   static bool _pinned = false;
   static bool _defaultsRegistered = false;
+
+  /// Permission checks the native (FFI) backend defers to.
+  ///
+  /// When null, the default, the FFI backend reports permission as granted and
+  /// leaves the OS to gate access when capture starts. Hosts that can reach a
+  /// platform permission API install one here; `microphone_flutter` does so on
+  /// Android. [reset] leaves it in place.
+  static MicrophonePermissionDelegate? permissionDelegate;
 
   /// Registers the backends that ship with `microphone_dart`.
   ///
