@@ -31,12 +31,19 @@
 /// backend prompts via getUserMedia.
 library;
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:microphone_dart/microphone_dart.dart';
 
 export 'package:microphone_dart/microphone_dart.dart';
 
 /// Flutter-side conveniences over the `microphone_dart` registry.
 abstract final class MicrophoneFlutter {
+  /// Hooks up Android's runtime microphone permission.
+  ///
+  /// Flutter's plugin registrant calls this at startup; apps do not need to.
+  static void registerWith() => _installPermissionDelegate();
+
   /// Ensures a capture backend is selected and ready.
   ///
   /// On native platforms `microphone_dart` already auto-registers the FFI
@@ -45,10 +52,32 @@ abstract final class MicrophoneFlutter {
   /// surfaces load errors early. Returns the name of the active backend (e.g.
   /// `ffi`, `web`, or `silent` when no microphone is available).
   static Future<String> ensureInitialized() async {
+    _installPermissionDelegate();
     final backend = Microphone.backend;
     if (backend.isAvailable) {
       await backend.initialize();
     }
     return backend.name;
   }
+
+  // A delegate the app installed itself is left in place.
+  static void _installPermissionDelegate() {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    Microphone.permissionDelegate ??= const _AndroidPermissions();
+  }
+}
+
+/// Asks the plugin's Kotlin side about `RECORD_AUDIO`.
+class _AndroidPermissions implements MicrophonePermissionDelegate {
+  const _AndroidPermissions();
+
+  static const _channel = MethodChannel('microphone_flutter/permission');
+
+  @override
+  Future<bool> hasPermission() async =>
+      await _channel.invokeMethod<bool>('hasPermission') ?? false;
+
+  @override
+  Future<bool> requestPermission() async =>
+      await _channel.invokeMethod<bool>('requestPermission') ?? false;
 }

@@ -14,7 +14,7 @@ topics:
 
 environment:
   sdk: ^3.10.0
-  flutter: '>=3.3.0'
+  flutter: '>=3.44.0'
 
 resolution: workspace
 
@@ -33,6 +33,12 @@ flutter:
     platforms:
       android:
         ffiPlugin: true
+        # Capture goes over FFI; the Kotlin plugin only requests the
+        # RECORD_AUDIO runtime permission, and registerWith hands it to
+        # microphone_dart at startup.
+        package: com.manymath.microphone_flutter
+        pluginClass: MicrophoneFlutterPlugin
+        dartPluginClass: MicrophoneFlutter
       ios:
         ffiPlugin: true
       linux:

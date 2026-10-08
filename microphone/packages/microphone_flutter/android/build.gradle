@@ -4,6 +4,7 @@ group = "com.manymath.microphone_flutter"
 version = "1.0"
 
 buildscript {
+    ext.kotlin_version = "2.2.20"
     repositories {
         google()
         mavenCentral()
@@ -12,6 +13,7 @@ buildscript {
     dependencies {
         // The Android Gradle Plugin knows how to build native code with the NDK.
         classpath("com.android.tools.build:gradle:8.11.1")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version")
     }
 }
 
@@ -42,10 +44,25 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    sourceSets {
+        main.java.srcDirs += "src/main/kotlin"
+    }
+
     defaultConfig {
         // AAudio (used by microphone for input capture) requires API 26+.
         minSdk = 26
     }
+}
+
+// Kotlin itself is applied by the Flutter Gradle plugin (or built into AGP 9+).
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
+}
+
+dependencies {
+    implementation("androidx.core:core:1.17.0")
 }
 
 // Build the shared `microphone` Rust crate via cargokit. The crate lives at the
