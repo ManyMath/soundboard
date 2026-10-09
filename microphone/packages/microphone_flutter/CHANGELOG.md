@@ -5,5 +5,8 @@
   API and adds `MicrophoneFlutter.ensureInitialized()`.
 - Documents the required platform permissions (Info.plist
   `NSMicrophoneUsageDescription` and the macOS audio-input entitlement on
-  Apple; `RECORD_AUDIO` on Android).
+  Apple).
+- Android: declares `RECORD_AUDIO` and requests it at runtime through
+  `Microphone.requestPermission()`, via a small Kotlin plugin. Requires
+  Flutter 3.44 or later.
 - Example app with a record/stop UI and a live input-level meter.

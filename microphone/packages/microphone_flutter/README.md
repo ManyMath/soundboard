@@ -21,16 +21,19 @@ if (await Microphone.requestPermission()) {
 
 ## Permissions
 
-The microphone is a protected resource; declare it in your app:
+The microphone is a protected resource:
 
+- **Android**: the plugin declares `RECORD_AUDIO`, which merges into your app's
+  manifest. It is a runtime permission, so call `Microphone.requestPermission()`
+  before recording; it shows the system dialog when needed and returns whether
+  access was granted. Without it, capture fails or records silence.
 - **macOS / iOS**: add `NSMicrophoneUsageDescription` to `Info.plist`. On macOS
   also enable the audio-input entitlement
-  (`com.apple.security.device.audio-input`) for sandboxed apps.
-- **Android**: add `<uses-permission android:name="android.permission.RECORD_AUDIO"/>`
-  to `AndroidManifest.xml`.
+  (`com.apple.security.device.audio-input`) for sandboxed apps. The OS prompts
+  on first capture.
+- **Web**: the browser prompts via getUserMedia.
 
-The OS prompts on first capture; the web backend prompts via getUserMedia. See
-the example app for working configuration.
+See the example app for working configuration.
 
 ## Precompiled binaries
 

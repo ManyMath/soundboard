@@ -18,17 +18,20 @@
 ///
 /// ## Platform permissions
 ///
-/// The microphone is a protected resource; your app must declare it:
+/// The microphone is a protected resource:
 ///
+/// - **Android**: this plugin declares `RECORD_AUDIO`, which merges into your
+///   app's manifest. It is a runtime permission, so call
+///   [Microphone.requestPermission] before recording: it shows the system
+///   dialog when needed and returns whether access was granted. Without it,
+///   capture fails or records silence.
 /// - **macOS / iOS**: add `NSMicrophoneUsageDescription` to the app's
 ///   `Info.plist` (a short reason shown in the system prompt). On macOS also
 ///   enable the "Audio Input" capability / `com.apple.security.device.audio-input`
-///   entitlement for sandboxed apps.
-/// - **Android**: add `<uses-permission android:name="android.permission.RECORD_AUDIO"/>`
-///   to `AndroidManifest.xml`.
-///
-/// The OS shows its permission prompt the first time capture starts. The web
-/// backend prompts via getUserMedia.
+///   entitlement for sandboxed apps. The OS prompts the first time capture
+///   starts; [Microphone.requestPermission] returns true without prompting.
+/// - **Web**: the browser prompts when [Microphone.requestPermission] or the
+///   first recording calls getUserMedia.
 library;
 
 import 'package:flutter/foundation.dart';
