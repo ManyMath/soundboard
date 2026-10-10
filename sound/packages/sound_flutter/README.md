@@ -15,17 +15,11 @@ final playback = await Sound.playFile('/path/to/chime.wav');
 await playback.onComplete;
 ```
 
-Building requires Rust (`rustup`). To remove even that for consumers, the repo
-is set up for cargokit precompiled binaries:
-
-- `native/sound_cli/cargokit.yaml` holds the public signing key and the
-  release URL prefix.
-- `.github/workflows/precompile.yml` builds and uploads signed binaries to
-  `precompiled_<crate-hash>` releases on tag pushes. It needs a
-  `CARGOKIT_PRIVATE_KEY` repository secret: the hex private key printed by
-  `dart run build_tool gen-key` (keep it secret; never commit it).
-
-Once a release exists, consuming builds download the matching signed binary
-instead of invoking cargo; with none present, cargokit builds from source.
+Building requires Rust (`rustup`). Precompiled binaries are not configured
+in this copy: the crate differs from upstream, so no published binary could
+match its hash. To offer them, add a `native/sound_cli/cargokit.yaml` with a
+`precompiled_binaries` `url_prefix` and the public key from
+`dart run build_tool gen-key`, and publish signed `precompiled_<crate-hash>`
+releases there.
 
 
