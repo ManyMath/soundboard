@@ -22,8 +22,9 @@ workspace:
   - apps/soundboard_example
 
 dependency_overrides:
-  # Keep sibling development hermetic; clones resolve the package from the
-  # ManyMath Git remote declared by packages/soundboard/pubspec.yaml.
+  # Sibling development: expects the mixer repository checked out at
+  # ../../mixer (see the README). Remove this override to resolve the Git
+  # dependency declared by packages/soundboard/pubspec.yaml instead.
   mixer_dart:
     path: ../../mixer/packages/mixer_dart
 

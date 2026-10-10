@@ -15,8 +15,8 @@ The project is split at the framework boundary:
 - `apps/soundboard_example` demonstrates physical-microphone selection, clips,
   gains, and a system-visible virtual microphone.
 
-The device-independent mixer is its own sibling project at `~/src/hardware/mixer`.
-That makes resampling, channel adaptation, gain, looping, seeking, and
+The device-independent mixer is its own repository,
+`ssh://git@ssh.manymath.com:2222/sneurlax/mixer.git`. That makes resampling, channel adaptation, gain, looping, seeking, and
 pause/resume reusable by projects other than Soundboard.
 
 ## Audio routes
@@ -86,7 +86,17 @@ CI is intentionally deferred.
 The Soundboard workspace includes `sound_dart`, `sound_flutter`,
 `microphone_dart`, `microphone_flutter`, `soundboard`, `soundboard_flutter`, and
 their examples. During sibling development, the root workspace overrides the
-`mixer_dart` Git dependency to `~/src/hardware/mixer/packages/mixer_dart`.
+`mixer_dart` Git dependency with the path `../../mixer/packages/mixer_dart`,
+relative to this repository, so check the mixer out two levels up first:
+
+```sh
+git clone ssh://git@ssh.manymath.com:2222/sneurlax/mixer.git ../../mixer
+(cd ../../mixer && dart pub get)
+flutter pub get
+```
+
+To build against the Git dependency instead, delete the `dependency_overrides`
+entry from the root `pubspec.yaml`.
 
 ## License
 
