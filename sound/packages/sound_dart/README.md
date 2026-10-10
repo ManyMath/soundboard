@@ -7,5 +7,5 @@ native audio over FFI.
 For Flutter apps, see the `sound_flutter` package, which builds the native 
 library for you via cargokit and should 'just work'.
 
-The only build-time requirement beyond Dart/Flutter is Rust.  That may be 
-worked-around with precompiled binaries (TODO).
+The only build-time requirement beyond Dart/Flutter is Rust. Precompiled
+binaries are not published; the package is built from source.

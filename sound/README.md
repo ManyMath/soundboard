@@ -2,8 +2,8 @@
 
 Cross-platform sound playback for Dart and Flutter with the goal of no 
 additional system dependencies for users or devs to install.  The only build-
-time requirement beyond Dart/Flutter is Rust, and eventually that will be 
-obviated via precompiled binaries (TODO).
+time requirement beyond Dart/Flutter is Rust. Precompiled binaries are not
+published: this copy is built from source inside the soundboard workspace.
 
 This is a [melos](https://melos.invertase.dev) monorepo:
 
