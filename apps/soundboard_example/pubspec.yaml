@@ -2,8 +2,8 @@ name: soundboard_example
 description: >-
   Example Flutter app for the soundboard package: shows the OS-level virtual
   microphone device, plays test tones into it, and mixes a selected physical
-  microphone into the mix. macOS uses the CoreAudio (BlackHole) virtual mic;
-  Linux uses the PipeWire virtual mic.
+  microphone into the mix. macOS uses the CoreAudio (BlackHole) virtual mic,
+  Windows the VB-CABLE virtual cable, and Linux the PipeWire virtual mic.
 publish_to: 'none'
 
 version: 1.0.0+1

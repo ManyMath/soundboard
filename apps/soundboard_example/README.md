@@ -6,6 +6,7 @@ browser) can select, plays test tones into it, and mixes a chosen physical
 microphone into the mix.
 
 - **macOS** routes the mix into the BlackHole loopback device via CoreAudio.
+- **Windows** routes the mix into the VB-CABLE virtual cable via WinMM.
 - **Linux** publishes a PipeWire virtual source.
 
 The `*_flutter` plugins build the native Rust libraries (`libsound_cli`,
@@ -21,27 +22,31 @@ brew install blackhole-2ch        # the loopback device
 sudo killall coreaudiod           # reload audio so it appears (or reboot)
 ```
 
+### Windows
+
+Install the VB-CABLE driver from VB-Audio and restart if prompted. Windows then
+lists `CABLE Input` as an output device and `CABLE Output` as an input device.
+
 ### Linux
 
-Have a running PipeWire session with `pw-loopback` and `pw-cat` (the `pipewire`
-package). No driver install needed.
+Have a running PipeWire session with `pw-loopback`, `pw-cat`, and `pw-cli` (the
+`pipewire` package). No driver install needed.
 
 ## Run
 
 ```sh
-flutter run -d macos      # or: flutter run -d linux
+flutter run -d macos      # or: flutter run -d windows / flutter run -d linux
 ```
 
 Then:
 
 1. Press **Go live** (grant the microphone permission prompt). The status card
-   shows the live device name -- "BlackHole 2ch" on macOS, "Soundboard" on
-   Linux.
+   shows the live device name -- "BlackHole 2ch" on macOS, "CABLE Output
+   (VB-Audio Virtual Cable)" on Windows, "Soundboard" on Linux.
 2. In any other app, select that device as the microphone.
 3. Press **Beep** or **Chord** to mix a tone into it, and pick a physical
    microphone from the dropdown to mix your voice in too. The sliders set the
    clip and microphone volumes.
 
-This app is intentionally not a member of the repo's pure-Dart pub workspace (a
-workspace cannot include Flutter packages); it uses path dependencies and
-`dependency_overrides` to pin the vendored `sound_dart`/`microphone_dart`.
+The app is a member of the repository's pub workspace and depends only on
+`soundboard_flutter`, which brings in the native build plugins.

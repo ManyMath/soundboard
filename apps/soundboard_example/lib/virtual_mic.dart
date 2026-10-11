@@ -3,10 +3,10 @@
 // virtual-cable output (VB-CABLE by default) on Windows. The UI talks to this
 // and never touches the platform-specific classes directly.
 //
-// Both backends expose the same shape -- isSupported / create / feed / dispose
-// plus a display name -- so the facade just forwards to whichever platform is
-// running. Importing both entry points here is fine: both are dart:io based and
-// this file is only used on desktop.
+// Every adapter exposes the same shape -- isSupported / create / feed /
+// dispose plus a display name -- so the facade just forwards to whichever
+// platform is running. Importing the desktop entry point here is fine: the
+// adapters are dart:io based and this file is only used on desktop.
 
 import 'dart:io';
 import 'dart:typed_data';
@@ -65,8 +65,8 @@ abstract final class VirtualMicPlatform {
         supported: await PipeWireVirtualMic.isSupported(),
         platformLabel: 'Linux (PipeWire)',
         hint:
-            'Needs a running PipeWire session with the pw-loopback and pw-cat '
-            'tools (install the "pipewire" package).',
+            'Needs a running PipeWire session with the pw-loopback, pw-cat, '
+            'and pw-cli tools (install the "pipewire" package).',
       );
     }
     if (Platform.isWindows) {
@@ -86,7 +86,8 @@ abstract final class VirtualMicPlatform {
   }
 
   /// Creates the platform virtual microphone at [format]. Throws the platform's
-  /// own exception (CoreAudioException / PipeWireException) when it cannot.
+  /// own exception (CoreAudioException / WindowsVirtualMicException /
+  /// PipeWireException) when it cannot.
   static Future<VirtualMic> create({required CaptureFormat format}) async {
     if (Platform.isMacOS) {
       final mic = await CoreAudioVirtualMic.create(format: format);
