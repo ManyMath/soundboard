@@ -32,8 +32,8 @@ dev_dependencies:
   melos: ^7.0.0
 
 # Melos 7 reads its configuration from here (the pub-workspace root). Scripts
-# mirror CI and use the right tool per package. The soundboard package is added
-# to these once it is scaffolded.
+# use the right tool per package; the mixer paths need the sibling checkout
+# (with its own `dart pub get`) described in the README.
 melos:
   name: soundboard
   scripts:
@@ -46,6 +46,8 @@ melos:
         dart analyze packages/soundboard &&
         flutter analyze sound/packages/sound_flutter &&
         flutter analyze microphone/packages/microphone_flutter &&
+        flutter analyze sound/packages/sound_flutter/example &&
+        flutter analyze microphone/packages/microphone_flutter/example &&
         flutter analyze packages/soundboard_flutter &&
         flutter analyze apps/soundboard_example
     format:
@@ -77,6 +79,8 @@ melos:
       run: >-
         dart test sound/packages/sound_dart &&
         dart test microphone/packages/microphone_dart &&
+        flutter test sound/packages/sound_flutter/test &&
+        flutter test microphone/packages/microphone_flutter/test &&
         dart test ../../mixer/packages/mixer_dart &&
         dart test packages/soundboard &&
         flutter test packages/soundboard_flutter/test &&
