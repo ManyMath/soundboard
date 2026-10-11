@@ -21,6 +21,9 @@ migration:
     - platform: macos
       create_revision: f5a8537f90d143abd5bb2f658fa69c388da9677b
       base_revision: f5a8537f90d143abd5bb2f658fa69c388da9677b
+    - platform: windows
+      create_revision: d3b14c876900e553bc736ca19295fc09e3853e8e
+      base_revision: d3b14c876900e553bc736ca19295fc09e3853e8e
 
   # User provided section
 
