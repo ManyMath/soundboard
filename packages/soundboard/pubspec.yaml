@@ -1,8 +1,8 @@
 name: soundboard
 description: >-
   Route and mix played sound into a microphone capture stream. Pure Dart on top
-  of sound_dart and microphone_dart, with the goal of no additional system
-  dependencies.
+  of sound_dart, microphone_dart, and mixer_dart, with the goal of no
+  additional system dependencies.
 version: 0.0.1
 publish_to: none
 repository: https://git.manymath.com/sneurlax/soundboard
@@ -18,8 +18,9 @@ environment:
 resolution: workspace
 
 dependencies:
-  # For the macOS CoreAudio virtual-mic FFI (coreaudio.dart). Already in the
-  # workspace via sound_dart, so this adds no new package to the project.
+  # For the CoreAudio and Windows virtual-mic FFI (coreaudio.dart,
+  # windows.dart). Already in the workspace via sound_dart, so this adds no new
+  # package to the project.
   ffi: ^2.1.0
   mixer_dart:
     git:

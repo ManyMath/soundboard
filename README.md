@@ -47,8 +47,9 @@ final recording = await backend.startRecording(retainPcm: false);
 ```
 
 Clips are converted to the board's sample rate and channel layout by
-`mixer_dart`. Mixing uses a floating-point accumulator and clamps once at the
-S16LE output boundary.
+`mixer_dart`. The clip bus sums voices in floating point and clamps once at its
+S16LE output; the microphone mix then adds that bus to the physical microphone
+and clamps the sum again.
 
 ## Flutter
 
