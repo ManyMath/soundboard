@@ -7,6 +7,9 @@ build/
 pubspec_overrides.yaml
 doc/api/
 
+# Written by packages/soundboard/example/soundboard_example.dart
+soundboard_mix.wav
+
 # Compiled web example output (build artifact)
 **/example/web/main.dart.js
 **/example/web/main.dart.js.deps
