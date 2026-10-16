@@ -64,6 +64,7 @@ Future<void> main() async {
   late final StreamSubscription<ProcessSignal> sigint;
   Future<void> shutdown() async {
     await sigint.cancel();
+    await recording.dispose();
     await vmic.dispose();
     await board.dispose();
   }
