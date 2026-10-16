@@ -10,14 +10,14 @@ import '../../capture_device.dart';
 import '../../capture_format.dart';
 import '../../exceptions.dart';
 import '../../file_writer.dart';
-import '../../microphone.dart';
+import '../../native_platform.dart';
 import '../../recording.dart';
 import '../../wav.dart';
 
 /// The default native backend on platforms with `dart:ffi`.
 CaptureBackend? createNativeBackend() => FfiBackend();
 
-// --- C ABI signatures, mirroring native/microphone/src/lib.rs ----------------
+// --- C ABI signatures, mirroring microphone_flutter's rust/src/lib.rs -------
 
 typedef _RecorderNewNative = Pointer<Void> Function();
 typedef _RecorderFreeNative = Void Function(Pointer<Void>);
@@ -38,10 +38,17 @@ typedef _DeviceFieldNative = Int32 Function(Int32, Pointer<Utf8>, Size);
 typedef _DeviceField = int Function(int, Pointer<Utf8>, int);
 typedef _DeviceIsDefaultNative = Int32 Function(Int32);
 typedef _DeviceIsDefault = int Function(int);
+typedef _PermissionNative = Int32 Function();
+typedef _Permission = int Function();
 
-// Recording state codes mirrored from the native side. Only the error code is
-// acted on here (0 recording / 1 stopped are inferred from our own lifecycle).
-const int _stateError = 2;
+// How long requestPermission waits for an answer to the system prompt.
+const Duration _permissionPromptLimit = Duration(minutes: 10);
+
+// microphone_permission_status codes.
+const int _permissionNotApplicable = 0;
+const int _permissionUndetermined = 1;
+const int _permissionDenied = 2;
+const int _permissionGranted = 3;
 
 /// Locates and opens the `microphone` shared library.
 class NativeLibrary {
@@ -100,7 +107,7 @@ class NativeLibrary {
     var dir = Directory.current.absolute;
     for (var i = 0; i < 6; i++) {
       for (final profile in ['release', 'debug']) {
-        yield '${dir.path}/native/microphone/target/$profile/$_fileName';
+        yield '${dir.path}/packages/microphone_flutter/rust/target/$profile/$_fileName';
       }
       final parent = dir.parent;
       if (parent.path == dir.path) break;
@@ -120,7 +127,6 @@ class _Bindings {
       ),
       start = lib.lookupFunction<_StartNative, _Start>('microphone_start'),
       read = lib.lookupFunction<_ReadNative, _Read>('microphone_read'),
-      state = lib.lookupFunction<_IdQueryNative, _IdQuery>('microphone_state'),
       sampleRate = lib.lookupFunction<_IdQueryNative, _IdQuery>(
         'microphone_sample_rate',
       ),
@@ -150,13 +156,23 @@ class _Bindings {
       deviceIsDefault = lib
           .lookupFunction<_DeviceIsDefaultNative, _DeviceIsDefault>(
             'microphone_device_is_default',
-          );
+          ),
+      permissionStatus = _optional(lib, 'microphone_permission_status'),
+      requestPermission = _optional(lib, 'microphone_request_permission');
+
+  // The permission calls arrived with ABI 2; an older library just lacks them.
+  static _Permission? _optional(DynamicLibrary lib, String symbol) {
+    try {
+      return lib.lookupFunction<_PermissionNative, _Permission>(symbol);
+    } on ArgumentError {
+      return null;
+    }
+  }
 
   final Pointer<Void> Function() recorderNew;
   final _RecorderFree recorderFree;
   final _Start start;
   final _Read read;
-  final _IdQuery state;
   final _IdQuery sampleRate;
   final _IdQuery channels;
   final _IdQuery pause;
@@ -168,13 +184,15 @@ class _Bindings {
   final _DeviceField deviceId;
   final _DeviceField deviceName;
   final _DeviceIsDefault deviceIsDefault;
+  final _Permission? permissionStatus;
+  final _Permission? requestPermission;
 }
 
 /// Captures audio by calling the native `microphone` library over FFI.
 class FfiBackend extends CaptureBackend {
   _Bindings? _bindings;
   Pointer<Void> _recorder = nullptr;
-  // Recordings still holding a native id on _recorder.
+  // Recordings whose native ids live in _recorder.
   final Set<FfiRecording> _live = {};
   bool _available = false;
   bool _probed = false;
@@ -219,20 +237,46 @@ class FfiBackend extends CaptureBackend {
     return ptr == nullptr ? 'unknown error' : ptr.toDartString();
   }
 
-  // There is no portable pure-Dart permission API. Where the OS gates access
-  // at capture time (e.g. the macOS TCC prompt on first use) report true and
-  // let capture surface a denial; a host that can ask the platform (Android's
-  // runtime RECORD_AUDIO, via microphone_flutter) installs a delegate instead.
+  // macOS and iOS answer through the native library; Android through the
+  // NativePlatform hooks microphone_flutter installs. Linux and Windows do
+  // not gate capture, so the native answer there is "not applicable".
   @override
-  Future<bool> hasPermission() async =>
-      await Microphone.permissionDelegate?.hasPermission() ?? true;
+  Future<bool> hasPermission() async {
+    final check = NativePlatform.checkPermission;
+    if (check != null) return check();
+    final status = _permissionStatus();
+    return status == _permissionGranted || status == _permissionNotApplicable;
+  }
 
   @override
-  Future<bool> requestPermission() async =>
-      await Microphone.permissionDelegate?.requestPermission() ?? true;
+  Future<bool> requestPermission() async {
+    final request = NativePlatform.requestPermission;
+    if (request != null) return request();
+    final ask = isAvailable ? _bindings!.requestPermission : null;
+    if (ask == null) return true;
+    var status = ask();
+    // The prompt is answered asynchronously; the native side only starts it
+    // and reports the answer once the user (or the system) gives one. A
+    // prompt may sit unanswered for a while, but give up eventually rather
+    // than wait forever on one the system never showed.
+    final waited = Stopwatch()..start();
+    while (status == _permissionUndetermined &&
+        waited.elapsed < _permissionPromptLimit) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      status = _permissionStatus();
+    }
+    return status == _permissionGranted || status == _permissionNotApplicable;
+  }
+
+  int _permissionStatus() {
+    final status = isAvailable ? _bindings!.permissionStatus : null;
+    return status == null ? _permissionNotApplicable : status();
+  }
 
   @override
   Future<List<CaptureDevice>> devices() async {
+    final hook = NativePlatform.devices;
+    if (hook != null) return hook();
     if (!isAvailable) return const [];
     final b = _bindings!;
     final count = b.deviceCount();
@@ -268,23 +312,21 @@ class FfiBackend extends CaptureBackend {
     bool retainPcm = true,
   }) async {
     if (_recorder == nullptr) await initialize();
-    final recording = FfiRecording._(
-      this,
-      format,
-      deviceId,
-      retainPcm: retainPcm,
-    );
-    _live.add(recording);
-    return recording;
+    // Capturing without permission fails on Android and records silence on
+    // Apple platforms, so ask first, as CaptureBackend promises.
+    if (!await hasPermission() && !await requestPermission()) {
+      throw const PermissionDeniedException();
+    }
+    return FfiRecording._(this, format, deviceId, retainPcm: retainPcm);
   }
 
-  /// Frees the native recorder, disposing any recording still running on it.
   @override
   Future<void> dispose() async {
-    // Their ids belong to this recorder; left alive they would keep polling
-    // a freed recorder, then alias the next recorder's ids after re-init.
+    // Live recordings would keep polling a freed recorder (or, after a later
+    // initialize(), a new one whose ids collide with theirs), so stop them
+    // first. Each keeps what it captured for stop()/pcm.
     for (final recording in _live.toList()) {
-      await recording.dispose();
+      await recording.stop();
     }
     if (_recorder != nullptr) {
       _bindings!.recorderFree(_recorder);
@@ -309,7 +351,11 @@ class FfiRecording implements Recording {
       if (cId != nullptr) malloc.free(cId);
     }
     if (_id == 0) {
-      throw CaptureException('capture failed: ${_backend._lastError()}');
+      final message = 'capture failed: ${_backend._lastError()}';
+      if (_backend._permissionStatus() == _permissionDenied) {
+        throw PermissionDeniedException(message);
+      }
+      throw CaptureException(message);
     }
     final rate = _b.sampleRate(_recorder, _id);
     final ch = _b.channels(_recorder, _id);
@@ -318,9 +364,12 @@ class FfiRecording implements Recording {
       channels: ch > 0 ? ch : requested.channels,
     );
     _state = RecordingState.recording;
+    _backend._live.add(this);
     // 16384 samples is generous headroom over the ~2205 samples produced per
-    // 50 ms at 44.1 kHz mono; _drain reads again when a stall fills it.
-    _buf = malloc<Int16>(_readCap);
+    // 50 ms at 44.1 kHz mono; _drain reads repeatedly when more is queued.
+    // Reads are whole frames so no frames event splits one across channels.
+    _readSamples = _readCap - _readCap % _format.channels;
+    _buf = malloc<Int16>(_readSamples);
     _poll = Timer.periodic(const Duration(milliseconds: 50), (_) => _drain());
   }
 
@@ -335,7 +384,8 @@ class FfiRecording implements Recording {
       StreamController<Uint8List>.broadcast();
 
   int _id = 0;
-  Pointer<Int16> _buf = nullptr;
+  late final int _readSamples;
+  late final Pointer<Int16> _buf;
   Timer? _poll;
   RecordingState _state = RecordingState.idle;
   Uint8List? _finalWav;
@@ -367,38 +417,42 @@ class FfiRecording implements Recording {
     );
   }
 
-  /// Copies whatever the native side has captured since the last poll into the
-  /// PCM buffer and the frame stream.
+  /// Copies everything the native side has captured since the last poll into
+  /// the PCM buffer and the frame stream.
   void _drain() {
     if (_id == 0 || _state == RecordingState.disposed) return;
-    final native = _b.state(_recorder, _id);
-    if (native == _stateError) {
-      _stopPolling();
-      _state = RecordingState.stopped;
-      if (!_frames.isClosed) {
-        _frames.addError(CaptureException(_backend._lastError()));
-        _frames.close();
+    // More than one buffer's worth can be queued when a poll runs late (a busy
+    // isolate) and on the final drain in stop(), so read until it runs dry.
+    while (true) {
+      final n = _b.read(_recorder, _id, _buf, _readSamples);
+      if (n < 0) {
+        // The native error message is thread-local, and by the next poll the
+        // isolate may be running on another OS thread, so fetch it right away.
+        _fail(_backend._lastError());
+        return;
       }
-      return;
-    }
-    // After an isolate stall (GC, a long frame) more than one buffer's worth
-    // can be queued natively, so keep reading until a read comes up short.
-    int n;
-    do {
-      n = _b.read(_recorder, _id, _buf, _readCap);
-      if (n <= 0) return;
+      if (n == 0) return;
       // Copy the n captured Int16 samples out of native memory as raw S16LE
-      // bytes. _buf.asTypedList is a view over native memory that the next
-      // read overwrites, so we make a private copy. The samples are LE on
-      // every platform we target.
-      final view = _buf.asTypedList(n); // Int16List over native memory
-      final bytes = Uint8List.fromList(
-        view.buffer.asUint8List(view.offsetInBytes, n * 2),
-      );
+      // bytes. asTypedList is a view over native memory that the next read
+      // overwrites, so we make a private copy. The samples are LE on every
+      // platform we target.
+      final bytes = Uint8List.fromList(_buf.cast<Uint8>().asTypedList(n * 2));
       _pcmBytes += bytes.length;
       if (_retainPcm) _pcm.add(bytes);
       if (!_frames.isClosed) _frames.add(bytes);
-    } while (n == _readCap);
+      if (n < _readSamples) return;
+    }
+  }
+
+  /// Ends the recording after a native capture error, surfacing [message] on
+  /// [frames].
+  void _fail(String message) {
+    _release();
+    _state = RecordingState.stopped;
+    if (!_frames.isClosed) {
+      _frames.addError(CaptureException(message));
+      _frames.close();
+    }
   }
 
   void _stopPolling() {
@@ -406,19 +460,15 @@ class FfiRecording implements Recording {
     _poll = null;
   }
 
-  /// Frees the native recording (closing the capture device) and the read
-  /// buffer. Safe to call more than once.
+  /// Stops polling and frees the native recording and the read buffer, which
+  /// closes the platform capture. Safe to call more than once.
   void _release() {
     _stopPolling();
-    if (_id != 0) {
-      _b.recordingFree(_recorder, _id);
-      _id = 0;
-    }
+    if (_id == 0) return;
+    _b.recordingFree(_recorder, _id);
+    _id = 0;
+    malloc.free(_buf);
     _backend._live.remove(this);
-    if (_buf != nullptr) {
-      malloc.free(_buf);
-      _buf = nullptr;
-    }
   }
 
   @override
@@ -442,19 +492,18 @@ class FfiRecording implements Recording {
   @override
   Future<Uint8List> stop() async {
     if (_finalWav != null) return _finalWav!;
-    if (_state == RecordingState.disposed) {
-      return _finalWav = wavFromPcm(_pcm.toBytes(), _format);
+    if (_state != RecordingState.disposed) {
+      if (_id != 0) {
+        _b.stop(_recorder, _id);
+        // Final drain of anything captured since the last poll.
+        _drain();
+      }
+      // microphone_stop only marks the recording stopped; the device keeps
+      // capturing (and buffering natively) until the recording is freed, so
+      // free it now rather than waiting for dispose().
+      _release();
+      _state = RecordingState.stopped;
     }
-    _stopPolling();
-    if (_id != 0) {
-      _b.stop(_recorder, _id);
-      // Final drain of anything captured since the last poll.
-      _drain();
-    }
-    // microphone_stop only flags the recording; the device stays open until
-    // the recording is freed, so free it now rather than waiting for dispose.
-    _release();
-    _state = RecordingState.stopped;
     if (!_frames.isClosed) await _frames.close();
     return _finalWav = wavFromPcm(_pcm.toBytes(), _format);
   }

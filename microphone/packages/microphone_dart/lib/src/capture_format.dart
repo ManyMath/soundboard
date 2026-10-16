@@ -19,12 +19,13 @@ extension SampleFormatSize on SampleFormat {
 /// ## Resample policy
 ///
 /// The requested [sampleRate] and [channels] are a request, not a guarantee.
-/// Backends honor them where the platform can (macOS/iOS AudioQueue and the web
-/// resample to the requested rate internally; on macOS this is verified for
+/// Backends honor them where the platform can (macOS/iOS AudioQueue resamples
+/// to the requested rate internally; on macOS this is verified for
 /// 8/16/44.1/48 kHz, mono and stereo). A backend that cannot reconfigure the
-/// device falls back to the device's native format. Either way the [Recording]
-/// reports the format actually in effect via [Recording.format] -- always read
-/// it rather than assuming the request was met. Captured audio is always
+/// device uses its own format instead: the web backend always captures mono at
+/// the browser's AudioContext rate (usually 48 kHz). Either way the
+/// [Recording] reports the format in effect via [Recording.format] -- always
+/// read it rather than assuming the request was met. Captured audio is always
 /// [SampleFormat.int16].
 class CaptureFormat {
   const CaptureFormat({

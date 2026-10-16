@@ -17,14 +17,23 @@ mod coreaudio;
 #[cfg(target_os = "ios")]
 mod ios_session;
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod permission;
+
 #[cfg(target_os = "android")]
 mod aaudio;
 
 #[cfg(target_os = "windows")]
 mod winmm;
 
+#[cfg(target_os = "windows")]
+mod winmm_names;
+
 #[cfg(target_os = "linux")]
 mod alsa;
+
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "windows"))]
+mod queue;
 
 /// A platform audio input that yields interleaved S16LE frames on demand.
 pub(crate) trait PcmSource: Send + Sync {
@@ -48,6 +57,16 @@ const STATE_RECORDING: u8 = 0;
 const STATE_STOPPED: u8 = 1;
 const STATE_ERROR: u8 = 2;
 const STATE_PAUSED: u8 = 3;
+
+// Microphone permission states (microphone_permission_status), mirrored by the
+// Dart side. Only Apple platforms report anything but "not applicable".
+const PERMISSION_NOT_APPLICABLE: c_int = 0;
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+const PERMISSION_UNDETERMINED: c_int = 1;
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+const PERMISSION_DENIED: c_int = 2;
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+const PERMISSION_GRANTED: c_int = 3;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -76,7 +95,6 @@ struct Recording {
     paused: AtomicBool,
     rate: u32,
     channels: u32,
-    error: Mutex<Option<String>>,
 }
 
 /// Owns the audio backend and the table of live recordings.
@@ -116,6 +134,10 @@ impl Recorder {
         rate: u32,
         device_id: Option<&str>,
     ) -> Result<Box<dyn PcmSource>, String> {
+        // A denied grant does not make AudioQueue fail; it records silence.
+        if permission::status() == PERMISSION_DENIED {
+            return Err("microphone access is denied (see the system privacy settings)".into());
+        }
         // iOS gates audio input behind an active AVAudioSession; macOS does not.
         #[cfg(target_os = "ios")]
         ios_session::activate()?;
@@ -132,9 +154,9 @@ impl Recorder {
         rate: u32,
         device_id: Option<&str>,
     ) -> Result<Box<dyn PcmSource>, String> {
-        // AAudio input device selection (by id) is not wired yet; uses default.
-        let _ = device_id;
-        let cap = aaudio::AaudioCapture::open(&self.aaudio, channels, rate)?;
+        // device_id, when set, is an AudioDeviceInfo id (listed through
+        // microphone_flutter, since AAudio cannot enumerate devices).
+        let cap = aaudio::AaudioCapture::open(&self.aaudio, channels, rate, device_id)?;
         Ok(Box::new(cap))
     }
 
@@ -158,9 +180,8 @@ impl Recorder {
         rate: u32,
         device_id: Option<&str>,
     ) -> Result<Box<dyn PcmSource>, String> {
-        // Linux ALSA device selection is not wired yet; uses default.
-        let _ = device_id;
-        let cap = alsa::AlsaCapture::open(&self.alsa, channels, rate)?;
+        // device_id, when set, is an ALSA PCM name; null opens "default".
+        let cap = alsa::AlsaCapture::open(&self.alsa, channels, rate, device_id)?;
         Ok(Box::new(cap))
     }
 
@@ -190,7 +211,6 @@ impl Recorder {
             paused: AtomicBool::new(false),
             rate,
             channels: actual_channels,
-            error: Mutex::new(None),
         });
         self.recordings.lock().unwrap().insert(id, recording);
         Ok(id)
@@ -208,7 +228,7 @@ impl Recorder {
 /// Returns the ABI version. Bumped when the C ABI changes.
 #[no_mangle]
 pub extern "C" fn microphone_abi_version() -> u32 {
-    1
+    2
 }
 
 /// Creates a recorder. Returns null on failure; see [microphone_last_error].
@@ -319,7 +339,6 @@ pub unsafe extern "C" fn microphone_read(
             n as isize
         }
         Err(e) => {
-            *recording.error.lock().unwrap() = Some(e.clone());
             recording.state.store(STATE_ERROR, Ordering::SeqCst);
             set_last_error(e);
             -1
@@ -327,8 +346,8 @@ pub unsafe extern "C" fn microphone_read(
     }
 }
 
-/// Returns the recording state (0 recording, 1 stopped, 2 error), or -1 if the
-/// id is unknown.
+/// Returns the recording state (0 recording, 1 stopped, 2 error, 3 paused), or
+/// -1 if the id is unknown.
 #[no_mangle]
 pub extern "C" fn microphone_state(recorder: *mut Recorder, id: u64) -> c_int {
     let Some(recorder) = with_recorder(recorder) else {
@@ -400,7 +419,9 @@ pub extern "C" fn microphone_resume(recorder: *mut Recorder, id: u64) -> c_int {
     }
 }
 
-/// Stops a recording. Returns 0 on success, -1 if the id is unknown.
+/// Marks a recording stopped. The platform capture keeps running, and audio
+/// stays readable, until [microphone_recording_free] releases it: drain with
+/// [microphone_read], then free. Returns 0 on success, -1 if the id is unknown.
 #[no_mangle]
 pub extern "C" fn microphone_stop(recorder: *mut Recorder, id: u64) -> c_int {
     let Some(recorder) = with_recorder(recorder) else {
@@ -428,6 +449,38 @@ pub extern "C" fn microphone_recording_free(recorder: *mut Recorder, id: u64) ->
     }
 }
 
+/// Returns the OS microphone permission state: 0 not applicable (the platform
+/// does not gate capture, or the state cannot be read), 1 not yet determined,
+/// 2 denied or restricted, 3 granted. Only macOS and iOS report states other
+/// than 0.
+#[no_mangle]
+pub extern "C" fn microphone_permission_status() -> c_int {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        permission::status()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    {
+        PERMISSION_NOT_APPLICABLE
+    }
+}
+
+/// Shows the system microphone permission prompt if the state is not yet
+/// determined, and returns the state as [microphone_permission_status] would.
+/// It does not wait for the answer: poll [microphone_permission_status] until
+/// it stops returning 1.
+#[no_mangle]
+pub extern "C" fn microphone_request_permission() -> c_int {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        permission::request()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    {
+        PERMISSION_NOT_APPLICABLE
+    }
+}
+
 /// Returns the most recent error message on the calling thread.
 #[no_mangle]
 pub extern "C" fn microphone_last_error() -> *const c_char {
@@ -445,8 +498,9 @@ pub(crate) struct DeviceInfo {
     pub is_default: bool,
 }
 
-/// Lists input devices for the current platform. macOS and Windows enumerate;
-/// other platforms return an empty list and capture uses the system default.
+/// Lists input devices for the current platform. macOS, Windows and Linux
+/// enumerate; other platforms return an empty list and capture uses the system
+/// default.
 fn enumerate_input_devices() -> Vec<DeviceInfo> {
     #[cfg(target_os = "macos")]
     {
@@ -456,7 +510,11 @@ fn enumerate_input_devices() -> Vec<DeviceInfo> {
     {
         winmm::enumerate_input_devices()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        alsa::enumerate_input_devices()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         Vec::new()
     }

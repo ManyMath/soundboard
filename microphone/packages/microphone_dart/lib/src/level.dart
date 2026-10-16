@@ -40,20 +40,20 @@ class AudioLevel {
       format.sampleFormat == SampleFormat.int16,
       'only int16 PCM is supported',
     );
-    // ByteData rather than an Int16List view: the chunk may start at an odd
-    // offset in its buffer, or end mid-sample.
-    final view = ByteData.sublistView(pcm);
-    final count = pcm.length >> 1;
-    if (count == 0) return silent;
+    // An Int16List view needs an even byte offset; a chunk that is a view at an
+    // odd offset (e.g. sliced out of a larger buffer) is copied first.
+    final aligned = pcm.offsetInBytes.isEven ? pcm : Uint8List.fromList(pcm);
+    final samples = Int16List.sublistView(aligned, 0, pcm.length & ~1);
+    if (samples.isEmpty) return silent;
     var sumSquares = 0.0;
     var peak = 0.0;
-    for (var i = 0; i < count; i++) {
-      final n = view.getInt16(i << 1, Endian.little) / 32768.0;
+    for (final s in samples) {
+      final n = s / 32768.0;
       sumSquares += n * n;
       final a = n.abs();
       if (a > peak) peak = a;
     }
-    final rms = math.sqrt(sumSquares / count);
+    final rms = math.sqrt(sumSquares / samples.length);
     return AudioLevel(rms: rms.clamp(0, 1), peak: peak.clamp(0, 1));
   }
 

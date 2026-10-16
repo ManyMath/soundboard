@@ -125,7 +125,7 @@ class Microphone {
   /// Starts a recording with the active backend.
   ///
   /// [format] requests a sample rate / channel count / encoding; the device may
-  /// force its own, so consult [Recording.format] for what is actually in
+  /// force its own, so consult [Recording.format] for what is in
   /// effect. [deviceId] selects an input from [devices] (null = system
   /// default). [retainPcm] is as on [CaptureBackend.startRecording]: pass
   /// false for an open-ended live stream so the recording does not accumulate

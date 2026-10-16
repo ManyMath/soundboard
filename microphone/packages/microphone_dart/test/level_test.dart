@@ -28,6 +28,20 @@ void main() {
       expect(AudioLevel.fromPcm(Uint8List(0), format), AudioLevel.silent);
     });
 
+    test('reads a chunk that is a view at an odd offset', () {
+      final backing = Uint8List(5)..setRange(1, 5, pcm([16384, -16384]));
+      final level = AudioLevel.fromPcm(
+        Uint8List.sublistView(backing, 1),
+        format,
+      );
+      expect(level.peak, closeTo(0.5, 1e-9));
+    });
+
+    test('ignores a trailing half sample', () {
+      final chunk = Uint8List(3)..setRange(0, 2, pcm([16384]));
+      expect(AudioLevel.fromPcm(chunk, format).peak, closeTo(0.5, 1e-9));
+    });
+
     test('full-scale samples read ~1.0', () {
       final level = AudioLevel.fromPcm(pcm([32767, -32768, 32767]), format);
       expect(level.peak, closeTo(1.0, 0.001));

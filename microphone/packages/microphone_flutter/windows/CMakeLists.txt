@@ -14,7 +14,7 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/../cargokit/cmake/cargokit.cmake")
 # The crate lives at the repo root, shared with the pure-Dart
 # `microphone_dart` package. The last argument is a real exported symbol so
 # the linker keeps the cargo library if it is ever force-linked into a target.
-apply_cargokit(${PROJECT_NAME} ../../../native/microphone microphone microphone_recorder_new)
+apply_cargokit(${PROJECT_NAME} ../rust microphone microphone_recorder_new)
 
 set(microphone_flutter_bundled_libraries
   "${${PROJECT_NAME}_cargokit_lib}"

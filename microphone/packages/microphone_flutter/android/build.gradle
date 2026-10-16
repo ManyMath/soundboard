@@ -4,7 +4,6 @@ group = "com.manymath.microphone_flutter"
 version = "1.0"
 
 buildscript {
-    ext.kotlin_version = "2.2.20"
     repositories {
         google()
         mavenCentral()
@@ -13,7 +12,6 @@ buildscript {
     dependencies {
         // The Android Gradle Plugin knows how to build native code with the NDK.
         classpath("com.android.tools.build:gradle:8.11.1")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version")
     }
 }
 
@@ -44,34 +42,22 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    sourceSets {
-        main.java.srcDirs += "src/main/kotlin"
-    }
-
     defaultConfig {
-        // AAudio (used by microphone for input capture) requires API 26+.
-        minSdk = 26
+        // Capture uses AAudio (API 26+), but the native library loads it at
+        // runtime, so nothing here needs 26 to build. Matching Flutter's own
+        // default lets apps build without raising their minSdk; on older
+        // devices recording fails with a CaptureException instead.
+        minSdk = 24
     }
 }
 
-// Kotlin itself is applied by the Flutter Gradle plugin (or built into AGP 9+).
-kotlin {
-    compilerOptions {
-        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
-    }
-}
-
-dependencies {
-    implementation("androidx.core:core:1.17.0")
-}
-
-// Build the shared `microphone` Rust crate via cargokit. The crate lives at the
-// repo root, shared with the pure-Dart `microphone_dart` package; cargokit
-// drops the per-ABI libmicrophone.so into jniLibs so it is packaged in the
-// APK and resolvable by DynamicLibrary.open('libmicrophone.so').
+// Build the `microphone` Rust crate (in this package's rust/ directory, so it
+// ships with the published plugin) via cargokit, which drops the per-ABI
+// libmicrophone.so into jniLibs so it is packaged in the APK and resolvable by
+// DynamicLibrary.open('libmicrophone.so').
 apply from: "../cargokit/gradle/plugin.gradle"
 
 cargokit {
-    manifestDir = "../../../native/microphone"
+    manifestDir = "../rust"
     libname = "microphone"
 }

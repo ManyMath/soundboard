@@ -21,24 +21,25 @@ if (await Microphone.requestPermission()) {
 
 ## Permissions
 
-The microphone is a protected resource:
+The microphone is a protected resource; declare it in your app:
 
-- **Android**: the plugin declares `RECORD_AUDIO`, which merges into your app's
-  manifest. It is a runtime permission, so call `Microphone.requestPermission()`
-  before recording; it shows the system dialog when needed and returns whether
-  access was granted. Without it, capture fails or records silence.
 - **macOS / iOS**: add `NSMicrophoneUsageDescription` to `Info.plist`. On macOS
   also enable the audio-input entitlement
-  (`com.apple.security.device.audio-input`) for sandboxed apps. The OS prompts
-  on first capture.
-- **Web**: the browser prompts via getUserMedia.
+  (`com.apple.security.device.audio-input`) for sandboxed apps.
+- **Android**: add `<uses-permission android:name="android.permission.RECORD_AUDIO"/>`
+  to `AndroidManifest.xml`. Capture uses AAudio, available from Android 8.0
+  (API 26); the plugin builds with Flutter's default `minSdk`, and on older
+  devices recording fails with a `CaptureException`.
 
-See the example app for working configuration.
+`Microphone.requestPermission()` shows the system prompt on Android, iOS,
+macOS and the web, and `Microphone.record()` asks first by itself when
+permission has not been granted, throwing `PermissionDeniedException` if the
+user refuses. Linux and Windows do not gate capture. See the example app for
+the platform configuration.
 
 ## Precompiled binaries
 
-Building requires Rust (`rustup`). Precompiled binaries are not configured:
-to offer them, add a `native/microphone/cargokit.yaml` with a
-`precompiled_binaries` `url_prefix` and the public key from
-`dart run build_tool gen-key`, and publish signed `precompiled_<crate-hash>`
-releases there.
+Building requires Rust (`rustup`). cargokit can download signed precompiled
+binaries instead of invoking cargo, but this repo does not publish them yet
+(there is no `rust/cargokit.yaml` or release workflow), so every
+build compiles the crate from source.

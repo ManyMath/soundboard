@@ -316,6 +316,22 @@ void main() {
       await other.close();
     });
 
+    test(
+      'a source that fails to start does not leave the others running',
+      () async {
+        final mic = SilentBackend();
+        final mixing = MixingCaptureBackend([
+          mic,
+          _FailingBackend(),
+        ], format: _fmt);
+        await expectLater(
+          mixing.startRecording(),
+          throwsA(isA<CaptureException>()),
+        );
+        expect(mic.started.single.state, RecordingState.disposed);
+      },
+    );
+
     test('mixes through the Microphone registry like any backend', () async {
       final primary = StreamController<Uint8List>();
       final other = StreamController<Uint8List>();
@@ -336,73 +352,15 @@ void main() {
       await primary.close();
       await other.close();
     });
-
-    test('a failed start stops the sources already started', () async {
-      final first = SilentBackend(chunk: const Duration(milliseconds: 10));
-      final mixing = MixingCaptureBackend([
-        first,
-        _FailingBackend(),
-      ], format: _fmt);
-
-      await expectLater(
-        mixing.startRecording(),
-        throwsA(isA<PermissionDeniedException>()),
-      );
-      expect(first.started.single.state, RecordingState.disposed);
-    });
-
-    test('stop keeps a final chunk a source flushes while stopping', () async {
-      final mixing = MixingCaptureBackend([
-        _FlushOnStopBackend(pcm16([7, 8])),
-      ], format: _fmt);
-      final rec = await mixing.startRecording();
-
-      final wav = await rec.stop();
-      expect(samples16(Uint8List.sublistView(wav, 44)), [7, 8]);
-    });
   });
 }
 
+/// A source whose recordings never start.
 class _FailingBackend extends SilentBackend {
   @override
   Future<Recording> startRecording({
     CaptureFormat format = const CaptureFormat(),
     String? deviceId,
     bool retainPcm = true,
-  }) async => throw const PermissionDeniedException();
-}
-
-/// A source that, like the FFI backend's final drain, delivers one last chunk
-/// from stop() before its frames close.
-class _FlushOnStopBackend extends SilentBackend {
-  _FlushOnStopBackend(this.tail);
-
-  final Uint8List tail;
-
-  @override
-  Future<Recording> startRecording({
-    CaptureFormat format = const CaptureFormat(),
-    String? deviceId,
-    bool retainPcm = true,
-  }) async => _FlushOnStopRecording(tail, format);
-}
-
-class _FlushOnStopRecording extends SilentRecording {
-  _FlushOnStopRecording(this._tail, CaptureFormat format)
-    : super(format, const Duration(seconds: 1));
-
-  final Uint8List _tail;
-  final _out = StreamController<Uint8List>.broadcast();
-
-  @override
-  Stream<Uint8List> get frames => _out.stream;
-
-  @override
-  Future<Uint8List> stop() async {
-    if (!_out.isClosed) {
-      _out.add(_tail);
-      await _out.close();
-    }
-    return super.stop();
-  }
+  }) async => throw const CaptureException('no device');
 }

@@ -12,18 +12,18 @@
 
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use libloading::Library;
 
+use crate::queue::SampleQueue;
 use crate::PcmSource;
 
 // Stable AAudio ABI constants.
 const AAUDIO_DIRECTION_INPUT: c_int = 1;
 const AAUDIO_FORMAT_PCM_I16: c_int = 1;
 const AAUDIO_OK: c_int = 0;
-const AAUDIO_ERROR_TIMEOUT: c_int = -885;
 
 type Builder = c_void;
 type Stream = c_void;
@@ -45,11 +45,13 @@ pub struct Aaudio {
     builder_set_sample_rate: FnBuilderSetI32,
     builder_set_channel_count: FnBuilderSetI32,
     builder_set_format: FnBuilderSetI32,
+    builder_set_device_id: FnBuilderSetI32,
     builder_open: FnBuilderOpen,
     builder_delete: FnBuilderDelete,
     stream_start: FnStreamOp,
     stream_read: FnStreamRead,
     stream_get_channel_count: FnStreamGetI32,
+    stream_get_device_id: FnStreamGetI32,
     stream_stop: FnStreamOp,
     stream_close: FnStreamOp,
     result_text: FnResultText,
@@ -61,8 +63,9 @@ unsafe impl Sync for Aaudio {}
 impl Aaudio {
     pub fn load() -> Result<Aaudio, String> {
         unsafe {
-            let lib = Library::new("libaaudio.so")
-                .map_err(|e| format!("failed to load libaaudio.so: {e}"))?;
+            let lib = Library::new("libaaudio.so").map_err(|e| {
+                format!("AAudio is unavailable (it needs Android 8.0, API 26, or newer): {e}")
+            })?;
             macro_rules! sym {
                 ($name:literal) => {
                     *lib.get($name).map_err(|e| {
@@ -76,11 +79,13 @@ impl Aaudio {
                 builder_set_sample_rate: sym!(b"AAudioStreamBuilder_setSampleRate\0"),
                 builder_set_channel_count: sym!(b"AAudioStreamBuilder_setChannelCount\0"),
                 builder_set_format: sym!(b"AAudioStreamBuilder_setFormat\0"),
+                builder_set_device_id: sym!(b"AAudioStreamBuilder_setDeviceId\0"),
                 builder_open: sym!(b"AAudioStreamBuilder_openStream\0"),
                 builder_delete: sym!(b"AAudioStreamBuilder_delete\0"),
                 stream_start: sym!(b"AAudioStream_requestStart\0"),
                 stream_read: sym!(b"AAudioStream_read\0"),
                 stream_get_channel_count: sym!(b"AAudioStream_getChannelCount\0"),
+                stream_get_device_id: sym!(b"AAudioStream_getDeviceId\0"),
                 stream_stop: sym!(b"AAudioStream_requestStop\0"),
                 stream_close: sym!(b"AAudioStream_close\0"),
                 result_text: sym!(b"AAudio_convertResultToText\0"),
@@ -109,16 +114,29 @@ unsafe impl Send for StreamPtr {}
 /// An open AAudio input stream feeding captured S16 frames into a shared buffer.
 pub struct AaudioCapture {
     aaudio: Arc<Aaudio>,
-    samples: Arc<Mutex<Vec<i16>>>,
-    // Set by the reader thread when a read error ends capture.
-    error: Arc<OnceLock<String>>,
+    samples: Arc<SampleQueue>,
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
     channels: u32,
 }
 
 impl AaudioCapture {
-    pub fn open(aaudio: &Arc<Aaudio>, channels: u32, rate: u32) -> Result<Self, String> {
+    /// Opens the input `device_id` names -- an `AudioDeviceInfo.getId()` as a
+    /// decimal string, as listed by microphone_flutter -- or the route Android
+    /// picks when it is `None` or `"default"`.
+    pub fn open(
+        aaudio: &Arc<Aaudio>,
+        channels: u32,
+        rate: u32,
+        device_id: Option<&str>,
+    ) -> Result<Self, String> {
+        let device = match device_id {
+            None | Some("default") => None,
+            Some(s) => Some(
+                s.parse::<c_int>()
+                    .map_err(|_| format!("invalid Android device id {s:?} (expected a number)"))?,
+            ),
+        };
         unsafe {
             let mut builder: *mut Builder = std::ptr::null_mut();
             let rc = (aaudio.create_builder)(&mut builder);
@@ -129,12 +147,25 @@ impl AaudioCapture {
             (aaudio.builder_set_sample_rate)(builder, rate as c_int);
             (aaudio.builder_set_channel_count)(builder, channels as c_int);
             (aaudio.builder_set_format)(builder, AAUDIO_FORMAT_PCM_I16);
+            if let Some(id) = device {
+                (aaudio.builder_set_device_id)(builder, id);
+            }
 
             let mut stream: *mut Stream = std::ptr::null_mut();
             let rc = (aaudio.builder_open)(builder, &mut stream);
             (aaudio.builder_delete)(builder);
             if rc != AAUDIO_OK {
                 return Err(format!("openStream: {}", aaudio.result_text(rc)));
+            }
+            // A device id is only a preference to AAudio: an unavailable one
+            // opens the default input instead. Recording from another input
+            // than the one asked for is worse than failing.
+            if let Some(id) = device {
+                let actual = (aaudio.stream_get_device_id)(stream);
+                if actual != id {
+                    (aaudio.stream_close)(stream);
+                    return Err(format!("input device {id} is not available"));
+                }
             }
             // The device may grant a different channel count than requested.
             let actual_channels = {
@@ -151,21 +182,18 @@ impl AaudioCapture {
                 return Err(format!("requestStart: {}", aaudio.result_text(rc)));
             }
 
-            let samples = Arc::new(Mutex::new(Vec::new()));
-            let error = Arc::new(OnceLock::new());
+            let samples = Arc::new(SampleQueue::default());
             let stop = Arc::new(AtomicBool::new(false));
             let reader = Self::spawn_reader(
                 aaudio.clone(),
                 StreamPtr(stream),
                 samples.clone(),
-                error.clone(),
                 stop.clone(),
                 actual_channels,
             );
             Ok(AaudioCapture {
                 aaudio: aaudio.clone(),
                 samples,
-                error,
                 stop,
                 reader: Some(reader),
                 channels: actual_channels,
@@ -176,8 +204,7 @@ impl AaudioCapture {
     fn spawn_reader(
         aaudio: Arc<Aaudio>,
         stream: StreamPtr,
-        samples: Arc<Mutex<Vec<i16>>>,
-        error: Arc<OnceLock<String>>,
+        samples: Arc<SampleQueue>,
         stop: Arc<AtomicBool>,
         channels: u32,
     ) -> JoinHandle<()> {
@@ -199,16 +226,15 @@ impl AaudioCapture {
                 };
                 if n > 0 {
                     let count = n as usize * channels as usize;
-                    if let Ok(mut s) = samples.lock() {
-                        s.extend_from_slice(&buf[..count]);
-                    }
-                } else if n < 0 && n != AAUDIO_ERROR_TIMEOUT {
-                    // Anything but a timeout (e.g. the device was
-                    // disconnected) ends capture, and read() reports why.
-                    let _ = error.set(format!("AAudioStream_read: {}", aaudio.result_text(n)));
+                    samples.push(&buf[..count]);
+                } else if n < 0 {
+                    // Negative is an error code (e.g. AAUDIO_ERROR_DISCONNECTED
+                    // when the input route changes). Capture is over; report
+                    // it through PcmSource::read rather than reading as silence.
+                    samples.fail(format!("AAudioStream_read: {}", aaudio.result_text(n)));
                     break;
                 }
-                // 0 or a timeout means no data yet; loop and check stop.
+                // n == 0 means timeout with no data; loop and check stop.
             }
             unsafe {
                 (aaudio.stream_stop)(stream.0);
@@ -220,22 +246,7 @@ impl AaudioCapture {
 
 impl PcmSource for AaudioCapture {
     fn read(&self, max: usize) -> Result<Vec<i16>, String> {
-        let mut samples = self.samples.lock().map_err(|e| e.to_string())?;
-        // Surface a capture error once everything captured before it is read.
-        if samples.is_empty() {
-            if let Some(e) = self.error.get() {
-                return Err(e.clone());
-            }
-        }
-        if samples.is_empty() || max == 0 {
-            return Ok(Vec::new());
-        }
-        if samples.len() <= max {
-            return Ok(std::mem::take(&mut *samples));
-        }
-        let rest = samples.split_off(max);
-        let out = std::mem::replace(&mut *samples, rest);
-        Ok(out)
+        self.samples.read(max)
     }
 
     fn channels(&self) -> u32 {

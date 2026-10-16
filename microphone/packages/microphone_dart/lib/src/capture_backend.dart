@@ -4,7 +4,7 @@ import 'recording.dart';
 
 /// A pluggable provider of microphone capture for a given platform/technique.
 ///
-/// `microphone_dart` is deliberately backend-agnostic: native platforms and
+/// `microphone_dart` is backend-agnostic: native platforms and
 /// CLI tools capture over FFI, the web uses getUserMedia, and other techniques
 /// can be layered on top. Several backends can be registered at once; the
 /// active one is chosen by [isAvailable] and [priority] (see `Microphone`).

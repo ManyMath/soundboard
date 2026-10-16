@@ -6,6 +6,7 @@
 // then open the printed URL and click "Record" (a user gesture is required
 // before the browser will grant microphone access).
 
+import 'dart:async';
 import 'dart:js_interop';
 import 'dart:typed_data';
 
@@ -37,14 +38,17 @@ Future<void> _start(
   web.HTMLButtonElement recordBtn,
   web.HTMLButtonElement stopBtn,
 ) async {
+  // Disable Record across the permission prompt so a second click cannot
+  // start a recording that nothing would stop.
+  recordBtn.disabled = true;
   try {
     final recording = await Microphone.record();
     _recording = recording;
     status.textContent = 'Recording at ${recording.format.sampleRate} Hz...';
-    recordBtn.disabled = true;
     stopBtn.disabled = false;
   } on Object catch (e) {
     status.textContent = 'Error: $e';
+    recordBtn.disabled = false;
   }
 }
 
@@ -55,9 +59,10 @@ Future<void> _stop(
 ) async {
   final recording = _recording;
   if (recording == null) return;
+  _recording = null;
+  stopBtn.disabled = true;
   final wav = await recording.stop();
   await recording.dispose();
-  _recording = null;
   recordBtn.disabled = false;
   stopBtn.disabled = true;
   status.textContent =
@@ -67,12 +72,13 @@ Future<void> _stop(
 
 /// Triggers a browser download of [wav] as recording.wav.
 void _offerDownload(Uint8List wav) {
-  final parts = <JSArrayBuffer>[wav.buffer.toJS].toJS as JSArray<web.BlobPart>;
+  final parts = <JSUint8Array>[wav.toJS].toJS as JSArray<web.BlobPart>;
   final blob = web.Blob(parts, web.BlobPropertyBag(type: 'audio/wav'));
   final url = web.URL.createObjectURL(blob);
   (web.document.createElement('a') as web.HTMLAnchorElement)
     ..href = url
     ..download = 'recording.wav'
     ..click();
-  web.URL.revokeObjectURL(url);
+  // Revoking right away can cancel the download before it starts.
+  Timer(const Duration(seconds: 1), () => web.URL.revokeObjectURL(url));
 }

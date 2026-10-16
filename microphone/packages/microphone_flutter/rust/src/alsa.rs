@@ -10,34 +10,33 @@
 //! `PcmSource::read` drains, so the device is serviced promptly regardless of how
 //! often Dart polls.
 
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use libloading::Library;
 
-use crate::PcmSource;
+use crate::queue::SampleQueue;
+use crate::{DeviceInfo, PcmSource};
 
 // ALSA error codes and constants.
 const SND_PCM_STREAM_CAPTURE: c_uint = 1;
 const SND_PCM_FORMAT_S16_LE: c_int = 2;
 const SND_PCM_ACCESS_RW_INTERLEAVED: c_uint = 3;
+const EAGAIN: c_int = 11;
+// How long the reader waits for input before rechecking its stop flag.
+const WAIT_MS: c_int = 20;
 
 type PcmT = c_void;
 type PcmHwParamsT = c_void;
-type FnPcmOpen = unsafe extern "C" fn(
-    *mut *mut PcmT,
-    *const c_char,
-    c_uint,
-    c_int,
-) -> c_int;
+type FnPcmOpen = unsafe extern "C" fn(*mut *mut PcmT, *const c_char, c_uint, c_int) -> c_int;
 type FnPcmClose = unsafe extern "C" fn(*mut PcmT) -> c_int;
 type FnPcmHwParamsMalloc = unsafe extern "C" fn(*mut *mut PcmHwParamsT) -> c_int;
 type FnPcmHwParamsFree = unsafe extern "C" fn(*mut PcmHwParamsT) -> c_int;
 type FnPcmHwParamsAny = unsafe extern "C" fn(*mut PcmT, *mut PcmHwParamsT) -> c_int;
-type FnPcmHwParamsSetAccess =
-    unsafe extern "C" fn(*mut PcmT, *mut PcmHwParamsT, c_uint) -> c_int;
+type FnPcmHwParamsSetAccess = unsafe extern "C" fn(*mut PcmT, *mut PcmHwParamsT, c_uint) -> c_int;
 type FnPcmHwParamsSetFormat = unsafe extern "C" fn(*mut PcmT, *mut PcmHwParamsT, c_int) -> c_int;
 type FnPcmHwParamsSetChannels = unsafe extern "C" fn(*mut PcmT, *mut PcmHwParamsT, c_uint) -> c_int;
 type FnPcmHwParamsSetRate =
@@ -48,7 +47,17 @@ type FnPcmStart = unsafe extern "C" fn(*mut PcmT) -> c_int;
 type FnPcmDrop = unsafe extern "C" fn(*mut PcmT) -> c_int;
 type FnPcmReadi = unsafe extern "C" fn(*mut PcmT, *mut c_void, c_ulong) -> c_long;
 type FnPcmRecover = unsafe extern "C" fn(*mut PcmT, c_int, c_int) -> c_int;
+type FnPcmNonblock = unsafe extern "C" fn(*mut PcmT, c_int) -> c_int;
+type FnPcmWait = unsafe extern "C" fn(*mut PcmT, c_int) -> c_int;
 type FnStrError = unsafe extern "C" fn(c_int) -> *const c_char;
+type FnDeviceNameHint = unsafe extern "C" fn(c_int, *const c_char, *mut *mut *mut c_void) -> c_int;
+type FnDeviceNameGetHint = unsafe extern "C" fn(*const c_void, *const c_char) -> *mut c_char;
+type FnDeviceNameFreeHint = unsafe extern "C" fn(*mut *mut c_void) -> c_int;
+
+extern "C" {
+    // snd_device_name_get_hint returns malloc'd strings the caller frees.
+    fn free(ptr: *mut c_void);
+}
 
 /// Resolved entry points into `libasound.so.2`.
 pub struct Alsa {
@@ -68,7 +77,12 @@ pub struct Alsa {
     pcm_drop: FnPcmDrop,
     pcm_readi: FnPcmReadi,
     pcm_recover: FnPcmRecover,
+    pcm_nonblock: FnPcmNonblock,
+    pcm_wait: FnPcmWait,
     str_error: FnStrError,
+    device_name_hint: FnDeviceNameHint,
+    device_name_get_hint: FnDeviceNameGetHint,
+    device_name_free_hint: FnDeviceNameFreeHint,
 }
 
 unsafe impl Send for Alsa {}
@@ -103,7 +117,12 @@ impl Alsa {
             let pcm_drop = sym!(b"snd_pcm_drop\0");
             let pcm_readi = sym!(b"snd_pcm_readi\0");
             let pcm_recover = sym!(b"snd_pcm_recover\0");
+            let pcm_nonblock = sym!(b"snd_pcm_nonblock\0");
+            let pcm_wait = sym!(b"snd_pcm_wait\0");
             let str_error = sym!(b"snd_strerror\0");
+            let device_name_hint = sym!(b"snd_device_name_hint\0");
+            let device_name_get_hint = sym!(b"snd_device_name_get_hint\0");
+            let device_name_free_hint = sym!(b"snd_device_name_free_hint\0");
 
             let alsa = Alsa {
                 pcm_open,
@@ -121,7 +140,12 @@ impl Alsa {
                 pcm_drop,
                 pcm_readi,
                 pcm_recover,
+                pcm_nonblock,
+                pcm_wait,
                 str_error,
+                device_name_hint,
+                device_name_get_hint,
+                device_name_free_hint,
                 _lib: lib,
             };
             Ok(alsa)
@@ -134,8 +158,19 @@ impl Alsa {
             if ptr.is_null() {
                 return format!("ALSA error {err}");
             }
-            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            CStr::from_ptr(ptr).to_string_lossy().into_owned()
         }
+    }
+
+    /// Reads one field (`NAME`, `DESC`, `IOID`) of a device-name hint.
+    unsafe fn hint_field(&self, hint: *const c_void, field: &CStr) -> Option<String> {
+        let ptr = (self.device_name_get_hint)(hint, field.as_ptr());
+        if ptr.is_null() {
+            return None;
+        }
+        let value = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+        free(ptr as *mut c_void);
+        Some(value)
     }
 }
 
@@ -147,29 +182,28 @@ unsafe impl Send for PcmPtr {}
 /// An open ALSA input stream feeding captured S16 frames into a shared buffer.
 pub struct AlsaCapture {
     alsa: Arc<Alsa>,
-    samples: Arc<Mutex<Vec<i16>>>,
-    // Set by the reader thread when an error it cannot recover from ends
-    // capture.
-    error: Arc<OnceLock<String>>,
+    samples: Arc<SampleQueue>,
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
     channels: u32,
 }
 
 impl AlsaCapture {
-    pub fn open(alsa: &Arc<Alsa>, channels: u32, rate: u32) -> Result<Self, String> {
+    /// Opens `device_id` (an ALSA PCM name such as `plughw:CARD=Audio,DEV=0`),
+    /// or `default` -- normally the sound server -- when it is `None`.
+    pub fn open(
+        alsa: &Arc<Alsa>,
+        channels: u32,
+        rate: u32,
+        device_id: Option<&str>,
+    ) -> Result<Self, String> {
+        let name = device_id.unwrap_or("default");
+        let device = CString::new(name).map_err(|e| e.to_string())?;
         unsafe {
-            // Open the default ALSA PCM input device (usually "default").
-            let device = std::ffi::CStr::from_bytes_with_nul(b"default\0").unwrap();
             let mut pcm: *mut PcmT = std::ptr::null_mut();
-            let rc = (alsa.pcm_open)(
-                &mut pcm,
-                device.as_ptr(),
-                SND_PCM_STREAM_CAPTURE,
-                0,
-            );
+            let rc = (alsa.pcm_open)(&mut pcm, device.as_ptr(), SND_PCM_STREAM_CAPTURE, 0);
             if rc < 0 {
-                return Err(format!("snd_pcm_open: {}", alsa.str_error(rc)));
+                return Err(format!("snd_pcm_open({name}): {}", alsa.str_error(rc)));
             }
 
             // Allocate and configure hardware parameters.
@@ -195,28 +229,40 @@ impl AlsaCapture {
             if rc < 0 {
                 (alsa.pcm_hw_params_free)(hw_params);
                 (alsa.pcm_close)(pcm);
-                return Err(format!("snd_pcm_hw_params_set_access: {}", alsa.str_error(rc)));
+                return Err(format!(
+                    "snd_pcm_hw_params_set_access: {}",
+                    alsa.str_error(rc)
+                ));
             }
 
             let rc = (alsa.pcm_hw_params_set_format)(pcm, hw_params, SND_PCM_FORMAT_S16_LE);
             if rc < 0 {
                 (alsa.pcm_hw_params_free)(hw_params);
                 (alsa.pcm_close)(pcm);
-                return Err(format!("snd_pcm_hw_params_set_format: {}", alsa.str_error(rc)));
+                return Err(format!(
+                    "snd_pcm_hw_params_set_format: {}",
+                    alsa.str_error(rc)
+                ));
             }
 
             let rc = (alsa.pcm_hw_params_set_channels)(pcm, hw_params, channels as c_uint);
             if rc < 0 {
                 (alsa.pcm_hw_params_free)(hw_params);
                 (alsa.pcm_close)(pcm);
-                return Err(format!("snd_pcm_hw_params_set_channels: {}", alsa.str_error(rc)));
+                return Err(format!(
+                    "snd_pcm_hw_params_set_channels: {}",
+                    alsa.str_error(rc)
+                ));
             }
 
             let rc = (alsa.pcm_hw_params_set_rate)(pcm, hw_params, rate as c_uint, 0);
             if rc < 0 {
                 (alsa.pcm_hw_params_free)(hw_params);
                 (alsa.pcm_close)(pcm);
-                return Err(format!("snd_pcm_hw_params_set_rate: {}", alsa.str_error(rc)));
+                return Err(format!(
+                    "snd_pcm_hw_params_set_rate: {}",
+                    alsa.str_error(rc)
+                ));
             }
 
             let rc = (alsa.pcm_hw_params)(pcm, hw_params);
@@ -241,21 +287,25 @@ impl AlsaCapture {
                 return Err(format!("snd_pcm_start: {}", alsa.str_error(rc)));
             }
 
-            let samples = Arc::new(Mutex::new(Vec::new()));
-            let error = Arc::new(OnceLock::new());
+            // Read without blocking (see spawn_reader).
+            let rc = (alsa.pcm_nonblock)(pcm, 1);
+            if rc < 0 {
+                (alsa.pcm_close)(pcm);
+                return Err(format!("snd_pcm_nonblock: {}", alsa.str_error(rc)));
+            }
+
+            let samples = Arc::new(SampleQueue::default());
             let stop = Arc::new(AtomicBool::new(false));
             let reader = Self::spawn_reader(
                 alsa.clone(),
                 PcmPtr(pcm),
                 samples.clone(),
-                error.clone(),
                 stop.clone(),
                 channels,
             );
             Ok(AlsaCapture {
                 alsa: alsa.clone(),
                 samples,
-                error,
                 stop,
                 reader: Some(reader),
                 channels,
@@ -266,8 +316,7 @@ impl AlsaCapture {
     fn spawn_reader(
         alsa: Arc<Alsa>,
         pcm: PcmPtr,
-        samples: Arc<Mutex<Vec<i16>>>,
-        error: Arc<OnceLock<String>>,
+        samples: Arc<SampleQueue>,
         stop: Arc<AtomicBool>,
         channels: u32,
     ) -> JoinHandle<()> {
@@ -278,7 +327,15 @@ impl AlsaCapture {
             // as needed and is drained by PcmSource::read.
             let frames_per_read: usize = 1024;
             let mut buf = vec![0i16; frames_per_read * channels as usize];
+            // A blocking readi only returns at a period boundary, which the
+            // sound server may set hundreds of milliseconds apart; Drop joins
+            // this thread, so that stalled stopping a recording. Wait in short
+            // slices instead and read whatever has arrived.
             while !stop.load(Ordering::SeqCst) {
+                let rc = unsafe { (alsa.pcm_wait)(pcm.0, WAIT_MS) };
+                if rc == 0 {
+                    continue; // timed out; recheck the stop flag
+                }
                 let n = unsafe {
                     (alsa.pcm_readi)(
                         pcm.0,
@@ -286,23 +343,23 @@ impl AlsaCapture {
                         frames_per_read as c_ulong,
                     )
                 };
+                // A failed wait is reported by the read that follows it.
                 if n > 0 {
                     let count = (n as usize) * (channels as usize);
-                    if let Ok(mut s) = samples.lock() {
-                        s.extend_from_slice(&buf[..count]);
-                    }
+                    samples.push(&buf[..count]);
+                } else if n == -(EAGAIN as c_long) {
+                    continue; // nothing ready after all
                 } else if n < 0 {
-                    // Overruns (-EPIPE) and suspends (-ESTRPIPE) are routine:
-                    // snd_pcm_recover re-prepares the stream and capture goes
-                    // on. Anything it cannot recover ends capture, and read()
-                    // reports why.
+                    // Negative is an error code. An overrun (-EPIPE) or a
+                    // suspend (-ESTRPIPE) is recoverable, at the cost of a
+                    // gap; anything else ends capture and is reported through
+                    // PcmSource::read rather than reading as silence.
                     let err = n as c_int;
                     if unsafe { (alsa.pcm_recover)(pcm.0, err, 1) } < 0 {
-                        let _ = error.set(format!("snd_pcm_readi: {}", alsa.str_error(err)));
+                        samples.fail(format!("snd_pcm_readi: {}", alsa.str_error(err)));
                         break;
                     }
                 }
-                // n == 0 means no data available; loop and retry.
             }
             unsafe {
                 let _ = (alsa.pcm_drop)(pcm.0);
@@ -314,22 +371,7 @@ impl AlsaCapture {
 
 impl PcmSource for AlsaCapture {
     fn read(&self, max: usize) -> Result<Vec<i16>, String> {
-        let mut samples = self.samples.lock().map_err(|e| e.to_string())?;
-        // Surface a capture error once everything captured before it is read.
-        if samples.is_empty() {
-            if let Some(e) = self.error.get() {
-                return Err(e.clone());
-            }
-        }
-        if samples.is_empty() || max == 0 {
-            return Ok(Vec::new());
-        }
-        if samples.len() <= max {
-            return Ok(std::mem::take(&mut *samples));
-        }
-        let rest = samples.split_off(max);
-        let out = std::mem::replace(&mut *samples, rest);
-        Ok(out)
+        self.samples.read(max)
     }
 
     fn channels(&self) -> u32 {
@@ -348,124 +390,96 @@ impl Drop for AlsaCapture {
     }
 }
 
+/// Lists ALSA capture devices: `default` (normally the sound server) first,
+/// then each sound card's input-capable PCMs. The ids are ALSA PCM names, which
+/// [`AlsaCapture::open`] accepts. Returns just `default` if the hints are
+/// unavailable, and nothing if libasound cannot be loaded.
+pub fn enumerate_input_devices() -> Vec<DeviceInfo> {
+    let Ok(alsa) = Alsa::load() else {
+        return Vec::new();
+    };
+    let mut out = vec![DeviceInfo {
+        id: "default".into(),
+        name: "Default".into(),
+        is_default: true,
+    }];
+    unsafe {
+        let mut hints: *mut *mut c_void = std::ptr::null_mut();
+        if (alsa.device_name_hint)(-1, c"pcm".as_ptr(), &mut hints) < 0 || hints.is_null() {
+            return out;
+        }
+        let mut i = 0;
+        loop {
+            let hint = *hints.add(i);
+            if hint.is_null() {
+                break;
+            }
+            i += 1;
+            let Some(name) = alsa.hint_field(hint, c"NAME") else {
+                continue;
+            };
+            let ioid = alsa.hint_field(hint, c"IOID");
+            if !is_card_input(&name, ioid.as_deref()) {
+                continue;
+            }
+            let label = match alsa.hint_field(hint, c"DESC") {
+                Some(desc) => one_line(&desc),
+                None => name.clone(),
+            };
+            out.push(DeviceInfo {
+                id: name,
+                name: label,
+                is_default: false,
+            });
+        }
+        (alsa.device_name_free_hint)(hints);
+    }
+    out
+}
+
+/// Whether a hinted PCM is one of a sound card's capture routes. Global plugins
+/// (rate converters, sound-server shims, `null`) are skipped -- `default`
+/// already reaches the sound server -- as are route kinds that only play but
+/// do not say so in IOID.
+fn is_card_input(name: &str, ioid: Option<&str>) -> bool {
+    const OUTPUT_ONLY: [&str; 5] = ["surround", "dmix", "usbstream", "iec958", "hdmi"];
+    name.contains("CARD=")
+        && ioid != Some("Output")
+        && !OUTPUT_ONLY.iter().any(|kind| name.starts_with(kind))
+}
+
+/// Folds a hint's two-line DESC ("USB Audio, USB Audio\nDirect sample snooping
+/// device") into one display line.
+fn one_line(desc: &str) -> String {
+    let mut lines = desc.lines().map(str::trim).filter(|l| !l.is_empty());
+    match (lines.next(), lines.next()) {
+        (Some(card), Some(kind)) => format!("{card} ({kind})"),
+        (Some(card), None) => card.to_string(),
+        _ => desc.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::collections::VecDeque;
-    use std::time::{Duration, Instant};
+    use super::{is_card_input, one_line};
 
-    const EPIPE: c_int = 32;
-    const ENODEV: c_int = 19;
-
-    // Stands in for a PCM handle: readi replays `results` (frame counts or
-    // negative error codes) in order, then reports no data.
-    struct FakePcm {
-        results: Mutex<VecDeque<c_long>>,
+    #[test]
+    fn keeps_card_capture_routes_only() {
+        assert!(is_card_input("plughw:CARD=Audio,DEV=0", None));
+        assert!(is_card_input("dsnoop:CARD=Audio,DEV=0", Some("Input")));
+        assert!(!is_card_input("hdmi:CARD=NVidia,DEV=0", Some("Output")));
+        assert!(!is_card_input("surround51:CARD=PCH", None));
+        assert!(!is_card_input("usbstream:CARD=PCH", None));
+        assert!(!is_card_input("pipewire", None));
+        assert!(!is_card_input("null", None));
     }
 
-    unsafe extern "C" fn fake_readi(pcm: *mut PcmT, buf: *mut c_void, _: c_ulong) -> c_long {
-        let fake = &*(pcm as *const FakePcm);
-        let Some(n) = fake.results.lock().unwrap().pop_front() else {
-            std::thread::sleep(Duration::from_millis(1));
-            return 0;
-        };
-        if n > 0 {
-            std::slice::from_raw_parts_mut(buf as *mut i16, n as usize).fill(n as i16);
-        }
-        n
-    }
-
-    // Like snd_pcm_recover: an overrun is recoverable, anything else is not.
-    unsafe extern "C" fn fake_recover(_: *mut PcmT, err: c_int, _: c_int) -> c_int {
-        if err == -EPIPE {
-            0
-        } else {
-            err
-        }
-    }
-
-    unsafe extern "C" fn fake_ok(_: *mut PcmT) -> c_int {
-        0
-    }
-
-    unsafe extern "C" fn fake_strerror(_: c_int) -> *const c_char {
-        c"No such device".as_ptr()
-    }
-
-    /// Runs the reader thread over a scripted mono PCM. None when the host has
-    /// no libasound to borrow the remaining entry points from.
-    fn scripted(results: &[c_long]) -> Option<AlsaCapture> {
-        let mut alsa = match Alsa::load() {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("skipping: {e}");
-                return None;
-            }
-        };
-        alsa.pcm_readi = fake_readi;
-        alsa.pcm_recover = fake_recover;
-        alsa.pcm_drop = fake_ok;
-        alsa.pcm_close = fake_ok;
-        alsa.str_error = fake_strerror;
-        let alsa = Arc::new(alsa);
-        // Leaked so it outlives the reader thread.
-        let fake: &'static FakePcm = Box::leak(Box::new(FakePcm {
-            results: Mutex::new(results.iter().copied().collect()),
-        }));
-        let samples = Arc::default();
-        let error = Arc::default();
-        let stop = Arc::default();
-        let reader = AlsaCapture::spawn_reader(
-            alsa.clone(),
-            PcmPtr(fake as *const FakePcm as *mut PcmT),
-            Arc::clone(&samples),
-            Arc::clone(&error),
-            Arc::clone(&stop),
-            1,
+    #[test]
+    fn folds_the_description_onto_one_line() {
+        assert_eq!(
+            one_line("USB Audio, USB Audio\nDirect sample snooping device"),
+            "USB Audio, USB Audio (Direct sample snooping device)"
         );
-        Some(AlsaCapture {
-            alsa,
-            samples,
-            error,
-            stop,
-            reader: Some(reader),
-            channels: 1,
-        })
-    }
-
-    /// Reads until `want` samples arrive, read() fails, or two seconds pass.
-    fn read_until(cap: &AlsaCapture, want: usize) -> (Vec<i16>, Option<String>) {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut got = Vec::new();
-        while got.len() < want && Instant::now() < deadline {
-            match cap.read(usize::MAX) {
-                Ok(s) => got.extend(s),
-                Err(e) => return (got, Some(e)),
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        (got, None)
-    }
-
-    #[test]
-    fn keeps_capturing_after_an_overrun() {
-        let Some(cap) = scripted(&[3, -EPIPE as c_long, 2]) else {
-            return;
-        };
-        let (got, err) = read_until(&cap, 5);
-        assert_eq!(err, None);
-        assert_eq!(got, [3, 3, 3, 2, 2]);
-    }
-
-    #[test]
-    fn reports_a_fatal_error_after_the_samples_before_it() {
-        let Some(cap) = scripted(&[3, -ENODEV as c_long]) else {
-            return;
-        };
-        let (got, err) = read_until(&cap, usize::MAX);
-        assert_eq!(got, [3, 3, 3]);
-        assert_eq!(err.as_deref(), Some("snd_pcm_readi: No such device"));
-        // The error sticks, so every later poll sees it too.
-        assert!(cap.read(16).is_err());
+        assert_eq!(one_line("HDA Intel PCH"), "HDA Intel PCH");
     }
 }

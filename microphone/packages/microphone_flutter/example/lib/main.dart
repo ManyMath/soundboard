@@ -31,6 +31,7 @@ class RecorderPage extends StatefulWidget {
 class _RecorderPageState extends State<RecorderPage> {
   String _backend = '...';
   String _status = 'idle';
+  bool _starting = false; // Record tapped, recording not started yet
   Recording? _recording;
   StreamSubscription<AudioLevel>? _levels;
   double _level = 0; // 0..1 live RMS level
@@ -85,33 +86,55 @@ class _RecorderPageState extends State<RecorderPage> {
   Future<void> _loadDevices() async {
     try {
       final devices = await Microphone.devices();
-      if (mounted) setState(() => _devices = devices);
+      if (!mounted) return;
+      setState(() {
+        _devices = devices;
+        // The dropdown needs its value among the items (web ids can change
+        // once permission is granted), so fall back to the default.
+        if (!devices.any((d) => d.id == _deviceId)) _deviceId = null;
+      });
     } on Object {
       // Enumeration is best-effort; the default device still works.
     }
   }
 
   Future<void> _start() async {
-    if (!await Microphone.requestPermission()) {
-      setState(() => _status = 'permission denied');
-      return;
-    }
-    // Web labels appear only after permission; refresh once granted.
-    if (_devices.every((d) => d.label.isEmpty || d.label == 'Microphone')) {
-      await _loadDevices();
-    }
+    // Record stays disabled until this finishes, so a second tap during the
+    // awaits cannot start a recording that nothing would ever stop.
+    setState(() => _starting = true);
     try {
+      if (!await Microphone.requestPermission()) {
+        if (mounted) setState(() => _status = 'permission denied');
+        return;
+      }
+      // Web labels appear only after permission; refresh once granted.
+      if (_devices.every((d) => d.label.isEmpty || d.label == 'Microphone')) {
+        await _loadDevices();
+      }
       final recording = await Microphone.record(deviceId: _deviceId);
-      _levels = recording.levels().listen((level) {
-        if (mounted) setState(() => _level = level.rms);
-      });
+      if (!mounted) {
+        await recording.dispose();
+        return;
+      }
+      _levels = recording.levels().listen(
+        (level) {
+          if (mounted) setState(() => _level = level.rms);
+        },
+        // A capture error (e.g. the input was unplugged) ends the recording.
+        onError: (Object e) {
+          if (mounted) setState(() => _status = 'error: $e');
+          _stop(keepStatus: true);
+        },
+      );
       setState(() {
         _recording = recording;
         _lastWav = null;
         _status = 'recording at ${recording.format.sampleRate} Hz';
       });
     } on Object catch (e) {
-      setState(() => _status = 'error: $e');
+      if (mounted) setState(() => _status = 'error: $e');
+    } finally {
+      if (mounted) setState(() => _starting = false);
     }
   }
 
@@ -123,22 +146,26 @@ class _RecorderPageState extends State<RecorderPage> {
     } else {
       await recording.pause();
     }
-    setState(() => _status = recording.state.name);
+    if (mounted) setState(() => _status = recording.state.name);
   }
 
-  Future<void> _stop() async {
+  Future<void> _stop({bool keepStatus = false}) async {
     final recording = _recording;
     if (recording == null) return;
+    _recording = null; // a second tap (or an error) finds nothing to stop
     await _levels?.cancel();
     _levels = null;
     final wav = await recording.stop();
     await recording.dispose();
+    if (!mounted) return;
     setState(() {
-      _recording = null;
       _level = 0;
       _lastWav = wav;
-      _status =
-          'recorded ${recording.duration.inMilliseconds} ms, ${wav.length} bytes';
+      if (!keepStatus) {
+        _status =
+            'recorded ${recording.duration.inMilliseconds} ms, '
+            '${wav.length} bytes';
+      }
     });
   }
 
@@ -187,7 +214,7 @@ class _RecorderPageState extends State<RecorderPage> {
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
                 FilledButton.icon(
-                  onPressed: recording ? null : _start,
+                  onPressed: recording || _starting ? null : _start,
                   icon: const Icon(Icons.mic),
                   label: const Text('Record'),
                 ),

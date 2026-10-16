@@ -4,6 +4,7 @@ library;
 import 'dart:typed_data';
 
 import 'package:microphone_dart/microphone_dart.dart';
+import 'package:microphone_dart/platform_hooks.dart';
 import 'package:microphone_dart/src/backends/native/native_backend_ffi.dart';
 import 'package:test/test.dart';
 
@@ -36,7 +37,7 @@ void main() {
       expect(_ascii(wav, 36, 40), 'data');
       final view = ByteData.sublistView(wav);
       expect(view.getUint32(40, Endian.little), wav.length - 44);
-      // Some audio was actually captured.
+      // Some audio was captured.
       expect(wav.length, greaterThan(44));
       expect(recording.duration, greaterThan(Duration.zero));
       await recording.dispose();
@@ -129,6 +130,128 @@ void main() {
       await recording.dispose();
     });
 
+    test('stop drains audio queued while the isolate was busy', () async {
+      Microphone.registerBackend(FfiBackend(), makeActive: true);
+      final recording = await Microphone.record(
+        format: const CaptureFormat(sampleRate: 48000, channels: 2),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      // Block the event loop so no poll runs: well over one read buffer's
+      // worth of audio piles up natively and must all come out on stop.
+      final busy = Stopwatch()..start();
+      while (busy.elapsedMilliseconds < 1000) {}
+      await recording.stop();
+      expect(
+        recording.duration,
+        greaterThan(const Duration(milliseconds: 1000)),
+      );
+      await recording.dispose();
+    });
+
+    test('a mix keeps the microphone audio drained on stop', () async {
+      const format = CaptureFormat(sampleRate: 48000, channels: 1);
+      final mixing = MixingCaptureBackend([
+        FfiBackend(),
+        SilentBackend(),
+      ], format: format);
+      Microphone.registerBackend(mixing, makeActive: true);
+      final recording = await Microphone.record();
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      // Leave the capture to the final drain in stop().
+      final busy = Stopwatch()..start();
+      while (busy.elapsedMilliseconds < 600) {}
+      await recording.stop();
+      expect(
+        recording.duration,
+        greaterThan(const Duration(milliseconds: 600)),
+      );
+      await recording.dispose();
+    });
+
+    test('frames events hold whole frames', () async {
+      Microphone.registerBackend(FfiBackend(), makeActive: true);
+      // Three channels do not divide the read buffer evenly; block the event
+      // loop so the backlog spans several full reads.
+      final recording = await Microphone.record(
+        format: const CaptureFormat(sampleRate: 48000, channels: 3),
+      );
+      final sizes = <int>[];
+      recording.frames.listen((c) => sizes.add(c.length));
+      final busy = Stopwatch()..start();
+      while (busy.elapsedMilliseconds < 500) {}
+      await recording.stop();
+      expect(sizes, isNotEmpty);
+      final bytesPerFrame = recording.format.bytesPerFrame;
+      expect(sizes.where((n) => n % bytesPerFrame != 0), isEmpty);
+      await recording.dispose();
+    });
+
+    test('disposing the backend stops its live recordings', () async {
+      final backend = FfiBackend();
+      Microphone.registerBackend(backend, makeActive: true);
+      final recording = await Microphone.record();
+      var closed = false;
+      recording.frames.listen(null, onDone: () => closed = true);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      await backend.dispose();
+      expect(recording.state, RecordingState.stopped);
+      expect(closed, isTrue);
+      final captured = recording.pcm.length;
+      expect(captured, greaterThan(0));
+
+      // Reusing the backend starts a fresh recorder whose recording ids
+      // restart; the old handle must not pick up the new capture.
+      await backend.initialize();
+      final next = await backend.startRecording();
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(recording.pcm.length, captured);
+      expect(next.pcm, isNotEmpty);
+      await next.dispose();
+      await recording.dispose();
+      await backend.dispose();
+    });
+
+    test('permission is not gated on this host', () async {
+      final backend = FfiBackend();
+      expect(await backend.hasPermission(), isTrue);
+      expect(await backend.requestPermission(), isTrue);
+    });
+
+    group('with NativePlatform permission hooks', () {
+      tearDown(() {
+        NativePlatform.checkPermission = null;
+        NativePlatform.requestPermission = null;
+      });
+
+      test('record asks first and fails when refused', () async {
+        var asked = 0;
+        NativePlatform.checkPermission = () async => false;
+        NativePlatform.requestPermission = () async {
+          asked++;
+          return false;
+        };
+        Microphone.registerBackend(FfiBackend(), makeActive: true);
+        expect(await Microphone.hasPermission(), isFalse);
+        await expectLater(
+          Microphone.record(),
+          throwsA(isA<PermissionDeniedException>()),
+        );
+        expect(asked, 1);
+      });
+
+      test('record proceeds once the request is granted', () async {
+        var granted = false;
+        NativePlatform.checkPermission = () async => granted;
+        NativePlatform.requestPermission = () async => granted = true;
+        Microphone.registerBackend(FfiBackend(), makeActive: true);
+        final recording = await Microphone.record();
+        expect(granted, isTrue);
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        expect((await recording.stop()).length, greaterThan(44));
+        await recording.dispose();
+      });
+    });
+
     test('dispose is idempotent and stop-after-dispose is safe', () async {
       Microphone.registerBackend(FfiBackend(), makeActive: true);
       final recording = await Microphone.record();
@@ -137,52 +260,6 @@ void main() {
       await recording.dispose(); // no throw
       final wav = await recording.stop(); // no throw
       expect(_ascii(wav, 0, 4), 'RIFF');
-    });
-
-    test('stop releases the native recording', () async {
-      final backend = FfiBackend();
-      Microphone.registerBackend(backend, makeActive: true);
-      final first = await Microphone.record();
-      await Future<void>.delayed(const Duration(milliseconds: 200));
-      await first.stop();
-      // A fresh recorder hands out the same ids again, so a handle `first`
-      // still held would now belong to `second`.
-      await backend.dispose();
-      final second = await Microphone.record();
-      await first.dispose();
-      await Future<void>.delayed(const Duration(milliseconds: 300));
-      expect(second.pcm, isNotEmpty);
-      await second.stop();
-      await second.dispose();
-    });
-
-    test('a stalled isolate loses no audio', () async {
-      Microphone.registerBackend(FfiBackend(), makeActive: true);
-      final recording = await Microphone.record(
-        format: const CaptureFormat(sampleRate: 44100, channels: 1),
-      );
-      final clock = Stopwatch()..start();
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-      // Block the event loop for well over one read buffer's worth of audio
-      // (16384 samples is ~370 ms here), so no poll runs meanwhile.
-      while (clock.elapsedMilliseconds < 1100) {}
-      final elapsed = clock.elapsedMilliseconds;
-      await recording.stop();
-      // Leave room for device start-up latency, not for a dropped backlog.
-      expect(recording.duration.inMilliseconds, greaterThan(elapsed * 0.8));
-      await recording.dispose();
-    });
-
-    test('disposing the backend disposes its live recordings', () async {
-      final backend = FfiBackend();
-      Microphone.registerBackend(backend, makeActive: true);
-      final recording = await Microphone.record();
-      var closed = false;
-      recording.frames.listen(null, onDone: () => closed = true);
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-      await backend.dispose();
-      expect(recording.state, RecordingState.disposed);
-      expect(closed, isTrue);
     });
   }, skip: available ? false : 'microphone library not built');
 }

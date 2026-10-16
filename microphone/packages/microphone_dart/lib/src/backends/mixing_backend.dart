@@ -108,9 +108,8 @@ class MixingCaptureBackend extends CaptureBackend {
         final s = _sources[i];
         await s.initialize();
         // The children only feed the mix through their frames; their own
-        // accumulated PCM is never read, so never retain it. [deviceId]
-        // selects the input of the primary (the microphone), where it is
-        // meaningful.
+        // accumulated PCM is never read, so never retain it. [deviceId] selects
+        // the input of the primary (the microphone), where it is meaningful.
         children.add(
           await s.startRecording(
             format: this.format,
@@ -119,13 +118,14 @@ class MixingCaptureBackend extends CaptureBackend {
           ),
         );
       }
-    } on Object {
-      // Nothing will own the sources that did start, so stop them here.
+    } catch (_) {
+      // Nothing else holds the children that did start (typically the live
+      // microphone), so shut them down before reporting the failure.
       for (final c in children) {
         try {
           await c.dispose();
         } on Object {
-          // Keep the original failure.
+          // Keep the original error.
         }
       }
       rethrow;
@@ -313,9 +313,9 @@ class MixingRecording implements Recording {
   @override
   Future<Uint8List> stop() async {
     if (_finalWav != null) return _finalWav!;
-    // Stop the children while still listening (and still recording), so a
-    // final chunk a child flushes on stop -- like the FFI backend's last
-    // drain -- makes it into the mix.
+    // Stop the children while still subscribed: a child's stop() can deliver
+    // a last chunk (the FFI backend's final drain), which still belongs in the
+    // mix.
     for (final c in _children) {
       try {
         await c.stop();

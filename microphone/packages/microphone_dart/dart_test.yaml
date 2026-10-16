@@ -1,0 +1,10 @@
+# Browser runs (`dart test -p chrome`) capture from Chrome's fake microphone
+# and auto-accept the permission prompt, so the web backend can be exercised
+# headless.
+override_platforms:
+  chrome:
+    settings:
+      arguments: >-
+        --use-fake-device-for-media-stream
+        --use-fake-ui-for-media-stream
+        --autoplay-policy=no-user-gesture-required

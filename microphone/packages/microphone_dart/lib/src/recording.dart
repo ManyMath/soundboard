@@ -35,7 +35,7 @@ abstract class Recording {
   /// Whether audio is currently being captured.
   bool get isRecording => state == RecordingState.recording;
 
-  /// The audio format actually in effect, which may differ from the one
+  /// The audio format in effect, which may differ from the one
   /// requested if the device forced its own (e.g. a fixed sample rate).
   CaptureFormat get format;
 

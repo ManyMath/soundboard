@@ -9,6 +9,7 @@ live input-level meter, and stop to keep the captured WAV in memory.
 flutter run -d macos    # also: -d <ios device>, -d chrome, an Android emulator
 ```
 
-The first recording prompts for microphone permission. The required platform
+The first recording prompts for microphone permission (on Linux and Windows
+there is nothing to grant). The required platform
 configuration is already in this example: `NSMicrophoneUsageDescription` and the
 audio-input entitlement on macOS/iOS, and `RECORD_AUDIO` on Android.

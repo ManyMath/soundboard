@@ -3,7 +3,7 @@ description: >-
   Microphone recording for Flutter with the goal of no additional system 
   dependencies.  Integrates the `microphone_dart` package and uses cargokit 
   to build the native Rust audio library and use it via FFI.
-version: 0.0.1
+version: 0.0.2
 repository: https://github.com/ManyMath/microphone
 issue_tracker: https://github.com/ManyMath/microphone/issues
 topics:
@@ -14,14 +14,14 @@ topics:
 
 environment:
   sdk: ^3.10.0
-  flutter: '>=3.44.0'
+  flutter: '>=3.38.0'
 
 resolution: workspace
 
 dependencies:
   flutter:
     sdk: flutter
-  microphone_dart: ^0.0.1
+  microphone_dart: ^0.0.2
 
 dev_dependencies:
   flutter_test:
@@ -33,12 +33,12 @@ flutter:
     platforms:
       android:
         ffiPlugin: true
-        # Capture goes over FFI; the Kotlin plugin only requests the
-        # RECORD_AUDIO runtime permission, and registerWith hands it to
-        # microphone_dart at startup.
+        # The Java side only handles the RECORD_AUDIO runtime permission;
+        # capture itself goes over FFI.
         package: com.manymath.microphone_flutter
         pluginClass: MicrophoneFlutterPlugin
-        dartPluginClass: MicrophoneFlutter
+        dartPluginClass: MicrophoneFlutterAndroid
+        dartFileName: src/android.dart
       ios:
         ffiPlugin: true
       linux:
