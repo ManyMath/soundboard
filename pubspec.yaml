@@ -89,9 +89,9 @@ melos:
       description: Build the vendored shared libraries (for CLI/dev use).
       run: >-
         cargo build --manifest-path sound/native/sound_cli/Cargo.toml &&
-        cargo build --manifest-path microphone/native/microphone/Cargo.toml
+        cargo build --manifest-path microphone/packages/microphone_flutter/rust/Cargo.toml
     native:test:
       description: Run the vendored Rust crate tests.
       run: >-
         cargo test --manifest-path sound/native/sound_cli/Cargo.toml &&
-        cargo test --manifest-path microphone/native/microphone/Cargo.toml
+        cargo test --manifest-path microphone/packages/microphone_flutter/rust/Cargo.toml

@@ -18,7 +18,7 @@ resolution: workspace
 dependencies:
   flutter:
     sdk: flutter
-  microphone_flutter: ^0.0.1
+  microphone_flutter: ^0.0.2
   sound_flutter: ^0.0.1
   soundboard: ^0.0.1
 
