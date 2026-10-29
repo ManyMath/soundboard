@@ -4,8 +4,8 @@ description: >-
   of sound_dart, microphone_dart, and mixer_dart, with the goal of no
   additional system dependencies.
 version: 0.0.1
-publish_to: none
-repository: https://git.manymath.com/sneurlax/soundboard
+repository: https://github.com/ManyMath/soundboard
+issue_tracker: https://github.com/ManyMath/soundboard/issues
 topics:
   - audio
   - microphone
@@ -22,7 +22,6 @@ dependencies:
   # windows.dart). Already in the workspace via sound_dart, so this adds no new
   # package to the project.
   ffi: ^2.1.0
-  # Resolved through the immutable private integration manifest at the root.
   mixer_dart: ^0.0.1
   microphone_dart: ^0.0.2
   sound_dart: ^0.0.2

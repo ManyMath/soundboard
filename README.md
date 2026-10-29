@@ -102,7 +102,7 @@ version constraints, so overrides cannot silently mask a version mismatch.
 These private application pins are not a public package dependency contract.
 The owner must mirror the exact source revisions and publish sound_dart and
 microphone_dart before their Flutter wrappers in the later public phase.
-All Soundboard packages remain `publish_to: none`.
+`soundboard` and `soundboard_flutter` are publishable once `sound_*` and `microphone_*` 0.0.2 are on pub.dev and the private overrides above are removed. The example app stays `publish_to: none`.
 
 ## Shared iOS session
 

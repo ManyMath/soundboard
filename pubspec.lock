@@ -332,22 +332,20 @@ packages:
     source: hosted
     version: "1.19.0"
   microphone_dart:
-    dependency: "direct overridden"
+    dependency: transitive
     description:
-      path: "packages/microphone_dart"
-      ref: "7030441f7b677df77cb5ea11beb97bdf7f062a1b"
-      resolved-ref: "7030441f7b677df77cb5ea11beb97bdf7f062a1b"
-      url: "ssh://git@git.manymath.com:2222/sneurlax/microphone.git"
-    source: git
+      name: microphone_dart
+      sha256: c375d06e325cc4a726546090324904159ad63821474879a15549399eb5f4b366
+      url: "https://pub.dev"
+    source: hosted
     version: "0.0.2"
   microphone_flutter:
-    dependency: "direct overridden"
+    dependency: transitive
     description:
-      path: "packages/microphone_flutter"
-      ref: "7030441f7b677df77cb5ea11beb97bdf7f062a1b"
-      resolved-ref: "7030441f7b677df77cb5ea11beb97bdf7f062a1b"
-      url: "ssh://git@git.manymath.com:2222/sneurlax/microphone.git"
-    source: git
+      name: microphone_flutter
+      sha256: b8b604b89bd848a922366b04fdbbe0613ed20722b2f093d5ed8f47e60886ce56
+      url: "https://pub.dev"
+    source: hosted
     version: "0.0.2"
   mime:
     dependency: transitive
@@ -358,13 +356,12 @@ packages:
     source: hosted
     version: "2.0.0"
   mixer_dart:
-    dependency: "direct overridden"
+    dependency: transitive
     description:
-      path: "packages/mixer_dart"
-      ref: b62596a4adf97e63087bfaa971d73c81f06d9151
-      resolved-ref: b62596a4adf97e63087bfaa971d73c81f06d9151
-      url: "ssh://git@git.manymath.com:2222/sneurlax/mixer.git"
-    source: git
+      name: mixer_dart
+      sha256: f63b573e5d66a4f508a2cf13179961a3d93d1943649e8cf4be2816ae66d4e609
+      url: "https://pub.dev"
+    source: hosted
     version: "0.0.1"
   mustache_template:
     dependency: transitive
@@ -500,22 +497,20 @@ packages:
     source: sdk
     version: "0.0.0"
   sound_dart:
-    dependency: "direct overridden"
+    dependency: transitive
     description:
-      path: "packages/sound_dart"
-      ref: "980a0c9ddc90b7105aff589a070abd5b1e7a2b30"
-      resolved-ref: "980a0c9ddc90b7105aff589a070abd5b1e7a2b30"
-      url: "ssh://git@git.manymath.com:2222/sneurlax/sound.git"
-    source: git
+      name: sound_dart
+      sha256: "0c50fd542e231fde0a04eb60d362de5fc1ad21818ff60dd4bfdfe3860b388947"
+      url: "https://pub.dev"
+    source: hosted
     version: "0.0.2"
   sound_flutter:
-    dependency: "direct overridden"
+    dependency: transitive
     description:
-      path: "packages/sound_flutter"
-      ref: "980a0c9ddc90b7105aff589a070abd5b1e7a2b30"
-      resolved-ref: "980a0c9ddc90b7105aff589a070abd5b1e7a2b30"
-      url: "ssh://git@git.manymath.com:2222/sneurlax/sound.git"
-    source: git
+      name: sound_flutter
+      sha256: "2f58b3b840f381e027e018c997506ef5fef990c077ea16b77b7b5dea276d06f8"
+      url: "https://pub.dev"
+    source: hosted
     version: "0.0.2"
   source_map_stack_trace:
     dependency: transitive

@@ -7,35 +7,6 @@ workspace:
   - packages/soundboard_flutter
   - apps/soundboard_example
 
-# Private integration pins; these are not public package dependencies.
-# Exact revisions and future owner mirror order live in tool/integration.json.
-dependency_overrides:
-  mixer_dart:
-    git:
-      url: ssh://git@git.manymath.com:2222/sneurlax/mixer.git
-      path: packages/mixer_dart
-      ref: b62596a4adf97e63087bfaa971d73c81f06d9151
-  microphone_dart:
-    git:
-      url: ssh://git@git.manymath.com:2222/sneurlax/microphone.git
-      path: packages/microphone_dart
-      ref: 7030441f7b677df77cb5ea11beb97bdf7f062a1b
-  microphone_flutter:
-    git:
-      url: ssh://git@git.manymath.com:2222/sneurlax/microphone.git
-      path: packages/microphone_flutter
-      ref: 7030441f7b677df77cb5ea11beb97bdf7f062a1b
-  sound_dart:
-    git:
-      url: ssh://git@git.manymath.com:2222/sneurlax/sound.git
-      path: packages/sound_dart
-      ref: 980a0c9ddc90b7105aff589a070abd5b1e7a2b30
-  sound_flutter:
-    git:
-      url: ssh://git@git.manymath.com:2222/sneurlax/sound.git
-      path: packages/sound_flutter
-      ref: 980a0c9ddc90b7105aff589a070abd5b1e7a2b30
-
 dev_dependencies:
   melos: ^7.0.0
   yaml: ^3.1.3
