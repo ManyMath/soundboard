@@ -1,97 +1,51 @@
 name: soundboard_workspace
 publish_to: none
-
-# Dart pub workspace root. Member packages set `resolution: workspace` and
-# share a single lockfile. Melos drives multi-package tooling on top of this.
-#
-# The vendored sound/ and microphone/ monorepos each shipped their own
-# pub-workspace root. A pub workspace cannot nest, so those intermediate roots
-# were removed and their leaf Dart and Flutter packages are members here.
 environment:
   sdk: ^3.10.0
-
 workspace:
-  - sound/packages/sound_dart
-  - sound/packages/sound_flutter
-  - sound/packages/sound_flutter/example
-  - microphone/packages/microphone_dart
-  - microphone/packages/microphone_flutter
-  - microphone/packages/microphone_flutter/example
   - packages/soundboard
   - packages/soundboard_flutter
   - apps/soundboard_example
 
+# Private integration pins; these are not public package dependencies.
+# Exact revisions and future owner mirror order live in tool/integration.json.
 dependency_overrides:
-  # Sibling development: expects the mixer repository checked out at
-  # ../../mixer (see the README). Remove this override to resolve the Git
-  # dependency declared by packages/soundboard/pubspec.yaml instead.
   mixer_dart:
-    path: ../../mixer/packages/mixer_dart
+    git:
+      url: ssh://git@git.manymath.com:2222/sneurlax/mixer.git
+      path: packages/mixer_dart
+      ref: b62596a4adf97e63087bfaa971d73c81f06d9151
+  microphone_dart:
+    git:
+      url: ssh://git@git.manymath.com:2222/sneurlax/microphone.git
+      path: packages/microphone_dart
+      ref: 7030441f7b677df77cb5ea11beb97bdf7f062a1b
+  microphone_flutter:
+    git:
+      url: ssh://git@git.manymath.com:2222/sneurlax/microphone.git
+      path: packages/microphone_flutter
+      ref: 7030441f7b677df77cb5ea11beb97bdf7f062a1b
+  sound_dart:
+    git:
+      url: ssh://git@git.manymath.com:2222/sneurlax/sound.git
+      path: packages/sound_dart
+      ref: 980a0c9ddc90b7105aff589a070abd5b1e7a2b30
+  sound_flutter:
+    git:
+      url: ssh://git@git.manymath.com:2222/sneurlax/sound.git
+      path: packages/sound_flutter
+      ref: 980a0c9ddc90b7105aff589a070abd5b1e7a2b30
 
 dev_dependencies:
   melos: ^7.0.0
-
-# Melos 7 reads its configuration from here (the pub-workspace root). Scripts
-# use the right tool per package; the mixer paths need the sibling checkout
-# (with its own `dart pub get`) described in the README.
+  yaml: ^3.1.3
+  pub_semver: ^2.2.0
 melos:
   name: soundboard
   scripts:
     analyze:
-      description: Analyze all Dart packages.
-      run: >-
-        dart analyze sound/packages/sound_dart &&
-        dart analyze microphone/packages/microphone_dart &&
-        dart analyze ../../mixer/packages/mixer_dart &&
-        dart analyze packages/soundboard &&
-        flutter analyze sound/packages/sound_flutter &&
-        flutter analyze microphone/packages/microphone_flutter &&
-        flutter analyze sound/packages/sound_flutter/example &&
-        flutter analyze microphone/packages/microphone_flutter/example &&
-        flutter analyze packages/soundboard_flutter &&
-        flutter analyze apps/soundboard_example
+      run: dart analyze packages/soundboard && flutter analyze packages/soundboard_flutter && flutter analyze apps/soundboard_example
     format:
-      description: Check Dart formatting.
-      run: >-
-        dart format --output none --set-exit-if-changed
-        sound/packages/sound_dart
-        microphone/packages/microphone_dart
-        sound/packages/sound_flutter/lib
-        microphone/packages/microphone_flutter/lib
-        ../../mixer/packages/mixer_dart
-        packages/soundboard
-        packages/soundboard_flutter/lib
-        apps/soundboard_example/lib
-    format:fix:
-      description: Apply Dart formatting.
-      run: >-
-        dart format
-        sound/packages/sound_dart
-        microphone/packages/microphone_dart
-        sound/packages/sound_flutter/lib
-        microphone/packages/microphone_flutter/lib
-        ../../mixer/packages/mixer_dart
-        packages/soundboard
-        packages/soundboard_flutter/lib
-        apps/soundboard_example/lib
+      run: dart format --output none --set-exit-if-changed packages/soundboard packages/soundboard_flutter/lib apps/soundboard_example/lib
     test:
-      description: Run Dart tests.
-      run: >-
-        dart test sound/packages/sound_dart &&
-        dart test microphone/packages/microphone_dart &&
-        flutter test sound/packages/sound_flutter/test &&
-        flutter test microphone/packages/microphone_flutter/test &&
-        dart test ../../mixer/packages/mixer_dart &&
-        dart test packages/soundboard &&
-        flutter test packages/soundboard_flutter/test &&
-        flutter test apps/soundboard_example/test
-    native:build:
-      description: Build the vendored shared libraries (for CLI/dev use).
-      run: >-
-        cargo build --manifest-path sound/native/sound_cli/Cargo.toml &&
-        cargo build --manifest-path microphone/packages/microphone_flutter/rust/Cargo.toml
-    native:test:
-      description: Run the vendored Rust crate tests.
-      run: >-
-        cargo test --manifest-path sound/native/sound_cli/Cargo.toml &&
-        cargo test --manifest-path microphone/packages/microphone_flutter/rust/Cargo.toml
+      run: dart test packages/soundboard && flutter test packages/soundboard_flutter/test && flutter test apps/soundboard_example/test

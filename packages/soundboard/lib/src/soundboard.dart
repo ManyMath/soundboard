@@ -198,12 +198,23 @@ class Soundboard {
   /// Resolve [physicalMic] before registering the result as the active global
   /// backend, or the soundboard would feed itself. For an open-ended session,
   /// use `retainPcm: false` when starting the returned backend.
-  CaptureBackend asMicrophoneBackend({CaptureBackend? physicalMic}) {
+  /// [audioSessionManagement] applies to the physical microphone. On iOS,
+  /// application mode leaves category, activation, routing and interruptions
+  /// to the application coordinating both playback and capture.
+  CaptureBackend asMicrophoneBackend({
+    CaptureBackend? physicalMic,
+    AudioSessionManagement audioSessionManagement =
+        AudioSessionManagement.automatic,
+  }) {
     // A mixing backend with one source supplies the Recording plumbing
     // (retained PCM, WAV output, pause state) around the board's microphone.
     return MixingCaptureBackend(
       <CaptureBackend>[
-        _BoardMicBackend(this, physicalMic ?? Microphone.backend),
+        _BoardMicBackend(
+          this,
+          physicalMic ?? Microphone.backend,
+          audioSessionManagement,
+        ),
       ],
       format: format,
       ownsSources: false,
@@ -355,10 +366,11 @@ final class SoundboardVoice {
 
 /// The physical microphone with live gain and the board's clip bus mixed in.
 class _BoardMicBackend extends CaptureBackend {
-  _BoardMicBackend(this._board, this._inner);
+  _BoardMicBackend(this._board, this._inner, this._sessionManagement);
 
   final Soundboard _board;
   final CaptureBackend _inner;
+  final AudioSessionManagement _sessionManagement;
 
   @override
   String get name => 'soundboard(${_inner.name})';
@@ -382,11 +394,28 @@ class _BoardMicBackend extends CaptureBackend {
     bool retainPcm = true,
   }) async {
     final board = _board.format;
-    final inner = await _inner.startRecording(
-      format: board,
-      deviceId: deviceId,
-      retainPcm: retainPcm,
-    );
+    final Recording inner;
+    if (_sessionManagement == AudioSessionManagement.application) {
+      final source = _inner;
+      if (source is! AudioSessionCaptureBackend) {
+        throw UnsupportedError(
+          'Physical microphone backend does not support application-managed audio sessions',
+        );
+      }
+      inner = await (source as AudioSessionCaptureBackend)
+          .startRecordingWithAudioSession(
+            audioSessionManagement: _sessionManagement,
+            format: board,
+            deviceId: deviceId,
+            retainPcm: retainPcm,
+          );
+    } else {
+      inner = await _inner.startRecording(
+        format: board,
+        deviceId: deviceId,
+        retainPcm: retainPcm,
+      );
+    }
     // The mix sums raw bytes, so a mic that fell back to another rate or
     // layout (the web always captures mono at the AudioContext rate) would be
     // mixed against the clip bus at the wrong speed and mislabelled.

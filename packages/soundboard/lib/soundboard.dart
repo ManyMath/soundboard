@@ -14,6 +14,7 @@ library;
 export 'package:microphone_dart/microphone_dart.dart'
     show
         AudioLevel,
+        AudioSessionManagement,
         CaptureBackend,
         CaptureDevice,
         CaptureException,

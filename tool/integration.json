@@ -1,0 +1,45 @@
+{
+  "scope": "Private application integration only; owner mirrors/releases later",
+  "dependencies": {
+    "mixer_dart": {
+      "repository": "https://git.manymath.com/sneurlax/mixer",
+      "path": "packages/mixer_dart",
+      "revision": "b62596a4adf97e63087bfaa971d73c81f06d9151",
+      "version": "0.0.1"
+    },
+    "microphone_dart": {
+      "repository": "https://git.manymath.com/sneurlax/microphone",
+      "path": "packages/microphone_dart",
+      "revision": "7030441f7b677df77cb5ea11beb97bdf7f062a1b",
+      "version": "0.0.2"
+    },
+    "microphone_flutter": {
+      "repository": "https://git.manymath.com/sneurlax/microphone",
+      "path": "packages/microphone_flutter",
+      "revision": "7030441f7b677df77cb5ea11beb97bdf7f062a1b",
+      "version": "0.0.2"
+    },
+    "sound_dart": {
+      "repository": "https://git.manymath.com/sneurlax/sound",
+      "path": "packages/sound_dart",
+      "revision": "980a0c9ddc90b7105aff589a070abd5b1e7a2b30",
+      "version": "0.0.2"
+    },
+    "sound_flutter": {
+      "repository": "https://git.manymath.com/sneurlax/sound",
+      "path": "packages/sound_flutter",
+      "revision": "980a0c9ddc90b7105aff589a070abd5b1e7a2b30",
+      "version": "0.0.2"
+    }
+  },
+  "publication_order": [
+    "Owner mirrors mixer, sound and microphone source revisions after private review",
+    "Owner publishes sound_dart and microphone_dart before their corresponding Flutter wrappers",
+    "Owner validates public consumers and updates public pins; Soundboard remains private publish_to:none"
+  ],
+  "vendor_preservation": {
+    "soundboard_source": "b0fa346d31d72d648a7bc427a8f695743b57d358",
+    "sound_inventory": "sound@980a0c9:tool/VENDOR_RECONCILIATION.md",
+    "microphone_inventory": "microphone@7030441:tool/VENDOR_RECONCILIATION.md"
+  }
+}

@@ -1,0 +1,58 @@
+name: Private canonical audio integration
+on:
+  push:
+    branches: [main, 'maintenance/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: soundboard-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  RUSTUP_TOOLCHAIN: 1.94.0
+  CARGO_HOME: ${{ runner.temp }}/soundboard-cargo-${{ github.run_id }}
+  CARGO_BUILD_JOBS: '3'
+  DASH__SUPPRESS_ANALYTICS: 'true'
+  FLUTTER_SUPPRESS_ANALYTICS: 'true'
+  GRADLE_USER_HOME: ${{ runner.temp }}/soundboard-gradle-${{ github.run_id }}
+  ANDROID_USER_HOME: ${{ runner.temp }}/soundboard-android-${{ github.run_id }}
+jobs:
+  integration:
+    runs-on: manymath-maintenance-linux-x64
+    timeout-minutes: 60
+    steps:
+      - name: Require private primary forge
+        env:
+          PRIMARY_SERVER: ${{ github.server_url }}
+        run: test "$PRIMARY_SERVER" = https://git.manymath.com
+      - uses: actions/checkout@v4
+      - name: Resolve canonical immutable dependencies
+        run: |
+          flutter --version
+          cargo --version
+          flutter pub get --enforce-lockfile
+          dart run tool/check_integration.dart
+          python3 tool/test_integration_gate.py
+      - name: Analysis and combined playback/capture regressions
+        run: |
+          dart analyze packages/soundboard tool
+          dart test packages/soundboard
+          flutter analyze packages/soundboard_flutter
+          flutter test packages/soundboard_flutter/test
+          flutter analyze apps/soundboard_example
+          flutter test apps/soundboard_example/test
+      - name: Check provisioned Android source-build prerequisites
+        run: |
+          rustup run stable rustc --version --verbose
+          for target in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
+            rustup target list --installed --toolchain stable | grep -Fx "$target"
+          done
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}"
+          test -d "$sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64"
+      - name: Build co-installed native plugins and web app
+        working-directory: apps/soundboard_example
+        run: |
+          flutter build linux --debug
+          flutter build apk --debug
+          flutter build web

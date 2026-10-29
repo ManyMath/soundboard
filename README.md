@@ -80,24 +80,55 @@ replace either without changing Soundboard's feeding model. Mobile and web can
 use the in-app mix but cannot publish a system-wide microphone through public
 platform APIs.
 
-CI is intentionally deferred.
+Private Gitea CI verifies the pinned integration.
 
 ## Workspace
 
-The Soundboard workspace includes `sound_dart`, `sound_flutter`,
-`microphone_dart`, `microphone_flutter`, `soundboard`, `soundboard_flutter`, and
-their examples. During sibling development, the root workspace overrides the
-`mixer_dart` Git dependency with the path `../../mixer/packages/mixer_dart`,
-relative to this repository, so check the mixer out two levels up first:
+The workspace contains Soundboard, its Flutter wrapper and its example app.
+Sound, microphone and mixer are separate canonical repositories. The root
+manifest pins their private Gitea revisions, recorded in `tool/integration.json`;
+no sibling checkout or vendored source is required.
 
 ```sh
-git clone ssh://git@ssh.manymath.com:2222/sneurlax/mixer.git ../../mixer
-(cd ../../mixer && dart pub get)
-flutter pub get
+flutter pub get --enforce-lockfile
+dart run tool/check_integration.dart
+dart test packages/soundboard
+flutter test packages/soundboard_flutter/test
+flutter test apps/soundboard_example/test
 ```
 
-To build against the Git dependency instead, delete the `dependency_overrides`
-entry from the root `pubspec.yaml`.
+The integration gate verifies actual resolved commits and original package
+version constraints, so overrides cannot silently mask a version mismatch.
+These private application pins are not a public package dependency contract.
+The owner must mirror the exact source revisions and publish sound_dart and
+microphone_dart before their Flutter wrappers in the later public phase.
+All Soundboard packages remain `publish_to: none`.
+
+## Shared iOS session
+
+An app coordinating playback and capture owns the iOS audio session. Configure
+and activate a record-capable session before starting either audio operation,
+then select `AudioSessionManagement.application` when creating the board's
+physical-microphone backend:
+
+```dart
+final capture = board.asMicrophoneBackend(
+  audioSessionManagement: AudioSessionManagement.application,
+);
+final recording = await capture.startRecording(retainPcm: false);
+```
+
+The app handles interruptions, routes and recovery, and deactivates only after
+all playback and capture have stopped. Microphone never deactivates on an
+individual recording's stop. Unsupported physical backends fail explicitly.
+Automatic session behavior remains the default for existing callers. Select
+ownership on `asMicrophoneBackend`; the returned mixing backend uses that
+configuration when registered through `Microphone` as well.
+
+Combined tests verify independent playback/capture lifetimes using synthetic
+input and a silent speaker. They do not prove iOS hardware behavior. Device
+acceptance still includes simultaneous playback/capture, interruption recovery,
+route changes, and the optional desktop virtual-microphone drivers.
 
 ## License
 

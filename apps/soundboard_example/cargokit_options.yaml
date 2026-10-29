@@ -1,0 +1,3 @@
+use_precompiled_binaries: false
+use_local_precompiled_binaries: false
+cache_local_builds: false
